@@ -165,23 +165,21 @@ Details and instrumentation:
   - Posterior per arm: $\hat{\theta} = A^{-1} b$, with $A = \lambda I + \sum x x^\top$, $b = \sum r x$.
   - Upper Confidence Bound:
     
-    $$\mathrm{UCB}(x) = \hat{\theta}^\top x + \alpha \, \sqrt{x^\top A^{-1} x}$$
+  $$\mathrm{UCB}(x) = \hat{\theta}^\top x + \alpha \, \sqrt{x^\top A^{-1} x}$$
     
   - Ordering by UCB increases $\Pr(\text{first pick} = \text{oracle-best})$. In offline sim, routing accuracy $\approx 1.0$ vs $0.5$ chance.
   - Instrument: log $x$, chosen arm, mean $= \hat{\theta}^\top x$, uncertainty $= \sqrt{x^\top A^{-1} x}$, and first-try success.
 - **Lower tail latency via fewer fallbacks**
   - Let $T_{\mathrm{E2E}} = T_{\mathrm{previews}} + T_{\mathrm{judge}} + T_{\mathrm{full}}$. With fallbacks:
 
-$$
-\mathbb{E}[T_{\mathrm{E2E}}] \approx T_{\mathrm{previews}} + T_{\mathrm{judge}} + \sum_{i=1}^{K} p_i \cdot T^{(i)}_{\mathrm{retry}} + T^{(\star)}_{\mathrm{full}}
-$$
+  $$\mathbb{E}[T_{\mathrm{E2E}}] \approx T_{\mathrm{previews}} + T_{\mathrm{judge}} + \sum_{i=1}^{K} p_i \cdot T^{(i)}_{\mathrm{retry}} + T^{(\star)}_{\mathrm{full}}$$
 
   - Higher first-try success lowers $\sum_i p_i$, shrinking mean and p95/p99 (per Tail at Scale).
   - Instrument: fallbacks per run, E2E p50/p95/p99, and retry time.
 - **Lower cost via reduced retries + bounded exploration**
   - Expected tokens:
     
-    $$\mathbb{E}[C] = C_{\mathrm{previews}} + C_{\mathrm{full}} + \sum_i p_i \cdot C^{(i)}_{\mathrm{retry}}$$
+  $$\mathbb{E}[C] = C_{\mathrm{previews}} + C_{\mathrm{full}} + \sum_i p_i \cdot C^{(i)}_{\mathrm{retry}}$$
     
   - Higher first-try success decreases $\sum_i p_i \cdot C^{(i)}_{\mathrm{retry}}$. $\alpha$ and $\lambda$ bound exploration; as data grows, $A^{-1}$ shrinks, reducing uncertainty.
   - Persistence of $(A^{-1}, b)$ across runs compounds learning and reduces cold-start waste.
@@ -196,9 +194,7 @@ $$
 ### What are bandits?
 - **Multi-armed bandits (MAB)**: sequential decisions balancing exploration vs exploitation. At round $t$, pick arm $a_t$, observe reward $r_t \in [0,1]$, aim to minimize cumulative regret:
   
-  $$
-  R_T = \sum_{t=1}^{T} \big(\mu^* - \mu_{a_t}\big)
-  $$
+  $$ R_T = \sum_{t=1}^{T} \big(\mu^* - \mu_{a_t}\big) $$
   
   where $\mu^*$ is the best arm’s expected reward.
 - **Contextual bandits**: each round comes with features $x_t$. Arm rewards depend on context: $\mu_a(x_t)$. The goal is to learn a routing policy $\pi(x)$ that picks the best arm for each context.
