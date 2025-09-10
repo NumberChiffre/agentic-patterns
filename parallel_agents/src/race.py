@@ -17,6 +17,12 @@ from .citations import (
     merge_and_dedupe,
     clean_citations_for_export,
 )
+from .services.cache_redis import (
+    redis_cache_enabled,
+    make_preview_key,
+    preview_cache_get,
+    preview_cache_set,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -158,19 +164,38 @@ async def race_with_judge_and_stream(
     ]
 
     logger.info("Starting parallel preview generation")
-    preview_tasks = [
-        asyncio.create_task(
-            stream_response(
-                agent,
-                query,
-                stop_after_tokens=min_preview_tokens,
-                capture_text=True,
-                log_every_tokens=20,
+    # Attempt Redis preview cache; fall back to streaming per agent
+    previews_results: list[tuple[int, str]] = []
+    if redis_cache_enabled():
+        for i, agent in enumerate(agents):
+            key = make_preview_key(query, selected_models[i], min_preview_tokens)
+            cached = preview_cache_get(key)
+            if cached is not None:
+                previews_results.append(cached)
+            else:
+                tokens, text = await stream_response(
+                    agent,
+                    query,
+                    stop_after_tokens=min_preview_tokens,
+                    capture_text=True,
+                    log_every_tokens=20,
+                )
+                preview_cache_set(key, tokens, text)
+                previews_results.append((tokens, text))
+    else:
+        preview_tasks = [
+            asyncio.create_task(
+                stream_response(
+                    agent,
+                    query,
+                    stop_after_tokens=min_preview_tokens,
+                    capture_text=True,
+                    log_every_tokens=20,
+                )
             )
-        )
-        for agent in agents
-    ]
-    previews_results = await asyncio.gather(*preview_tasks)
+            for agent in agents
+        ]
+        previews_results = await asyncio.gather(*preview_tasks)
     previews_outcomes = [
         PreviewOutcome(
             name=agents[i].name,
