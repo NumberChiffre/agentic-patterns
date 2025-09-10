@@ -80,7 +80,11 @@ async def judge_previews(
 
 
 def compute_candidate_order(verdict: JudgeVerdict, total_candidates: int) -> list[int]:
-    index_to_overall: dict[int, float] = {s.index: float(s.overall) for s in verdict.scores}
-    return sorted(range(total_candidates), key=lambda i: index_to_overall.get(i, 0.0), reverse=True)
-
-
+    index_to_overall: dict[int, float] = {
+        s.index: float(s.overall) for s in verdict.scores
+    }
+    return sorted(
+        range(total_candidates),
+        key=lambda i: index_to_overall.get(i, 0.0),
+        reverse=True,
+    )

@@ -37,21 +37,13 @@ The CLI automatically loads `.env` (via `python-dotenv`).
 uv run parallel-agents --help
 ```
 
-Key arguments:
-- `query` (positional): the research question/prompt
-- `--judge-model`: model ID for the judge (required)
-- `--agent-models`: comma-separated candidate model IDs (required)
-- `--min-preview-tokens`: minimum preview tokens per candidate (default 120)
-- `--strategy`: `baseline` or `bandit` (default `baseline`)
-
 5) Minimal run
 
 ```bash
 uv run parallel-agents "What are the key risks and mitigations of LLM hallucinations in production?" \
   --judge-model gpt-4o \
   --agent-models "gpt-4o,gpt-4o-mini" \
-  --strategy bandit \
-  --wandb
+  --strategy bandit
 ```
 
 6) Full bandit example
@@ -155,12 +147,12 @@ flowchart LR
   STREAM -.-> LOG
 ```
 
-### How bandit improves the parallel race
+### Why bandit routing (and when to use it)
 
-- **Better first choice**: Instead of sending previews in static order, LinUCB ranks models by expected reward for the current query (features like normalized length, later extendable to intent/safety/health).
-- **Lower tail latency**: Winner is more likely to produce the final answer, reducing fallback attempts and end-to-end p95/p99.
-- **Lower cost**: Fewer retries; exploration is bounded via alpha and ridge regularization, with learned state persisted across runs.
-- **Drift resilience**: As providers degrade/improve, updates shift traffic automatically.
+- **Better first choice**: LinUCB ranks candidate models by expected reward for the current query (context features like normalized length, and can be extended to intent/safety/health cues).
+- **Lower tail latency**: Higher probability the first model produces the final answer reduces fallback attempts, shrinking end-to-end p95/p99.
+- **Lower cost**: Fewer retries and bounded exploration via `alpha` and `ridge` lower tokens and $/resolved.
+- **Drift resilience**: Traffic shifts as providers change quality/latency; state persists across runs.
 
 Details and instrumentation:
 - **LinUCB scoring (supports "better first choice")**
@@ -170,7 +162,7 @@ Details and instrumentation:
   $$\mathrm{UCB}(x) = \hat{\theta}^\top x + \alpha \, \sqrt{x^\top A^{-1} x}$$
     
   - Ordering by UCB increases $\Pr(\text{first pick} = \text{oracle-best})$. In offline sim, routing accuracy $\approx 1.0$ vs $0.5$ chance.
-  - Instrument: log $x$, chosen arm, mean $= \hat{\theta}^\top x$, uncertainty $= \sqrt{x^\top A^{-1} x}$, and first-try success.
+  - Instrument: log context features $x$, chosen arm, mean $= \hat{\theta}^\top x$, uncertainty $= \sqrt{x^\top A^{-1} x}$, and first-try success.
 - **Lower tail latency via fewer fallbacks**
   - Let $T_{\mathrm{E2E}} = T_{\mathrm{previews}} + T_{\mathrm{judge}} + T_{\mathrm{full}}$. With fallbacks:
 

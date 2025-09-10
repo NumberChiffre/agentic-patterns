@@ -33,5 +33,3 @@ async def test_race_with_judge_and_stream_bandit() -> None:
     assert 0 <= idx < 2
     assert isinstance(agent_name, str) and agent_name
     assert isinstance(debug, dict)
-
-

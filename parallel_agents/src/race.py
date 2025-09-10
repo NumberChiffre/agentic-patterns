@@ -12,9 +12,92 @@ from .judge import compute_candidate_order, judge_previews
 from .streaming import stream_response
 from .routing_linucb import LinUCBRouter
 from .types import PreviewOutcome, Strategy
-from .citations import extract_citations_from_text, merge_and_dedupe, clean_citations_for_export
+from .citations import (
+    extract_citations_from_text,
+    merge_and_dedupe,
+    clean_citations_for_export,
+)
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_strategy(value: Strategy | str) -> Strategy:
+    return value if isinstance(value, Strategy) else Strategy(str(value))
+
+
+def _default_features(q: str, length_threshold: int = 2000) -> list[float]:
+    length = len(q or "")
+    word_count = len((q or "").split())
+    return [
+        1.0,
+        min(1.0, length / float(length_threshold)),
+        min(1.0, word_count / 100.0),
+    ]
+
+
+def _select_models_for_strategy(
+    query: str,
+    candidate_models: list[str],
+    strategy_value: Strategy,
+    *,
+    bandit_alpha: float,
+    bandit_ridge_lambda: float,
+    bandit_state_path: str | None,
+    feature_extractor: Callable[..., list[float]],
+    length_threshold: int,
+) -> tuple[list[str], LinUCBRouter | None, list[float] | None]:
+    selected_models = list(candidate_models)
+    if strategy_value != Strategy.BANDIT:
+        return selected_models, None, None
+
+    router = LinUCBRouter(
+        d=3,
+        alpha=bandit_alpha,
+        ridge_lambda=bandit_ridge_lambda,
+        state_path=Path(bandit_state_path) if bandit_state_path else None,
+    )
+    feats = feature_extractor(query, length_threshold=length_threshold)
+    selected_models = router.select(feats, selected_models, k=len(selected_models))
+    return selected_models, router, feats
+
+
+def _update_bandit_rewards(
+    router: LinUCBRouter | None,
+    feats: list[float] | None,
+    verdict,
+    previews_outcomes: list[PreviewOutcome],
+    selected_models: list[str],
+    min_preview_tokens: int,
+    reward_weights: tuple[float, float],
+):
+    if router is None or feats is None:
+        return
+    wq, ws = reward_weights
+    rewards_by_model: dict[str, float] = {}
+    for i, m in enumerate(selected_models):
+        overall = 0.0
+        for s in verdict.scores:
+            if s.index == i:
+                overall = float(s.overall)
+                break
+        speed_proxy = min(
+            1.0, max(0.0, previews_outcomes[i].tokens / float(min_preview_tokens))
+        )
+        reward = max(0.0, min(1.0, wq * overall + ws * speed_proxy))
+        rewards_by_model[m] = reward
+    router.bulk_update(feats, rewards_by_model)
+
+
+def _collect_citations(previews_text: list[str], full_response_text: str) -> list[dict]:
+    try:
+        preview_citations = []
+        for t in previews_text:
+            preview_citations.extend(extract_citations_from_text(t or ""))
+        full_citations = extract_citations_from_text(full_response_text or "")
+        merged = merge_and_dedupe(preview_citations, full_citations)
+        return clean_citations_for_export(merged)
+    except Exception:
+        return []
 
 
 @weave.op
@@ -40,22 +123,18 @@ async def race_with_judge_and_stream(
     logger.info("=" * 80)
     if not agent_models:
         raise ValueError("agent_models must contain at least one model name")
-    selected_models = list(agent_models)
-    strategy_value = Strategy(str(strategy)) if not isinstance(strategy, Strategy) else strategy
-    if strategy_value == Strategy.BANDIT:
-        def _default_features(q: str, length_threshold: int = 2000) -> list[float]:
-            length = len(q or "")
-            # Add word count as a third feature to match existing state dimensions
-            word_count = len((q or "").split())
-            return [1.0, min(1.0, length / float(length_threshold)), min(1.0, word_count / 100.0)]
-        router = LinUCBRouter(
-            d=3,
-            alpha=bandit_alpha,
-            ridge_lambda=bandit_ridge_lambda,
-            state_path=Path(bandit_state_path) if bandit_state_path else None,
-        )
-        feats = (feature_extractor or _default_features)(query, length_threshold=length_threshold)
-        selected_models = router.select(feats, selected_models, k=len(selected_models))
+    strategy_value = _resolve_strategy(strategy)
+    feature_fn = feature_extractor or _default_features
+    selected_models, router, feats = _select_models_for_strategy(
+        query,
+        list(agent_models),
+        strategy_value,
+        bandit_alpha=bandit_alpha,
+        bandit_ridge_lambda=bandit_ridge_lambda,
+        bandit_state_path=bandit_state_path,
+        feature_extractor=feature_fn,
+        length_threshold=length_threshold,
+    )
 
     num_agents = len(selected_models)
     preview_instructions = [
@@ -80,17 +159,29 @@ async def race_with_judge_and_stream(
 
     logger.info("Starting parallel preview generation")
     preview_tasks = [
-        asyncio.create_task(stream_response(agent, query, stop_after_tokens=min_preview_tokens, capture_text=True, log_every_tokens=20))
+        asyncio.create_task(
+            stream_response(
+                agent,
+                query,
+                stop_after_tokens=min_preview_tokens,
+                capture_text=True,
+                log_every_tokens=20,
+            )
+        )
         for agent in agents
     ]
     previews_results = await asyncio.gather(*preview_tasks)
     previews_outcomes = [
-        PreviewOutcome(name=agents[i].name, text=(previews_results[i][1] or ""), tokens=previews_results[i][0])
+        PreviewOutcome(
+            name=agents[i].name,
+            text=(previews_results[i][1] or ""),
+            tokens=previews_results[i][0],
+        )
         for i in range(len(agents))
     ]
+    previews_text = [po.text for po in previews_outcomes]
 
     logger.info("All previews complete, sending to judge")
-    previews_text = [po.text for po in previews_outcomes]
     verdict = await judge_previews(
         query,
         previews_text,
@@ -98,7 +189,7 @@ async def race_with_judge_and_stream(
         min_preview_tokens,
         num_candidates=num_agents,
     )
-    ordered_indices = compute_candidate_order(verdict, len(agents))
+    ordered_indices = compute_candidate_order(verdict, num_agents)
 
     final_idx: int | None = None
     final_agent_name: str | None = None
@@ -119,7 +210,13 @@ async def race_with_judge_and_stream(
             f"Continue with the full answer now."
         )
         logger.info("Generating full answer")
-        full_tokens, full_response_text = await stream_response(full_agent, seed, stop_after_tokens=None, capture_text=True, log_every_tokens=50)
+        full_tokens, full_response_text = await stream_response(
+            full_agent,
+            seed,
+            stop_after_tokens=None,
+            capture_text=True,
+            log_every_tokens=50,
+        )
         final_idx = idx
         final_agent_name = full_agent.name
         break
@@ -127,19 +224,16 @@ async def race_with_judge_and_stream(
     if final_idx is None:
         raise RuntimeError("All candidates failed to stream full answer")
 
-    # Bandit reward update (if enabled): blend judge overall with preview speed proxy
     if strategy_value == Strategy.BANDIT:
-        wq, ws = reward_weights
-        feats = (feature_extractor or _default_features)(query, length_threshold=length_threshold)
-        for i, m in enumerate(selected_models):
-            overall = 0.0
-            for s in verdict.scores:
-                if s.index == i:
-                    overall = float(s.overall)
-                    break
-            speed_proxy = min(1.0, max(0.0, previews_outcomes[i].tokens / float(min_preview_tokens)))
-            reward = max(0.0, min(1.0, wq * overall + ws * speed_proxy))
-            router.update(feats, m, reward)
+        _update_bandit_rewards(
+            router,
+            feats,
+            verdict,
+            previews_outcomes,
+            selected_models,
+            min_preview_tokens,
+            reward_weights,
+        )
 
     debug: dict[str, object] = {
         "previews": previews_text,
@@ -154,20 +248,8 @@ async def race_with_judge_and_stream(
         "strategy": strategy_value,
     }
 
-    # Extract and dedupe citations from previews and full response text
-    try:
-        preview_citations = []
-        for t in previews_text:
-            preview_citations.extend(extract_citations_from_text(t or ""))
-        full_citations = extract_citations_from_text(full_response_text or "")
-        merged = merge_and_dedupe(preview_citations, full_citations)
-        debug["citations"] = clean_citations_for_export(merged)
-    except Exception:
-        debug["citations"] = []
-
+    debug["citations"] = _collect_citations(previews_text, full_response_text)
     logger.info("=" * 80)
     logger.info("Run complete!")
     logger.info("=" * 80)
     return final_idx, final_agent_name or "", debug
-
-

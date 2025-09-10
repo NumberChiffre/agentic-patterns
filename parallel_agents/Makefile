@@ -1,11 +1,13 @@
-.PHONY: help lint test default
+.PHONY: help fix test default
 
 help: ## Show available commands
 	@echo "Available commands:"
-	@echo "  make lint  - Auto-fix lint issues with ruff"
+	@echo "  make fix   - Ruff autofix + format"
+	@echo "  make test  - Run tests"
 
-lint: ## Auto-fix lint issues with ruff
+fix: ## Auto-fix with ruff and format
 	uv run ruff check --fix .
+	uv run ruff format .
 
 test: ## Run tests
 	uv run pytest -v tests

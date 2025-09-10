@@ -9,16 +9,27 @@ class JudgeScores(BaseModel):
     """Per-candidate evaluation metrics for preview quality used to select a winner."""
 
     index: int = Field(
-        ..., ge=0, description="Zero-based candidate index corresponding to the input ordering"
+        ...,
+        ge=0,
+        description="Zero-based candidate index corresponding to the input ordering",
     )
     relevance: float = Field(
-        ..., ge=0, le=1, description="How directly the preview addresses the user query (0..1)"
+        ...,
+        ge=0,
+        le=1,
+        description="How directly the preview addresses the user query (0..1)",
     )
     coverage: float = Field(
-        ..., ge=0, le=1, description="Breadth/depth of sections and evidence plan (0..1)"
+        ...,
+        ge=0,
+        le=1,
+        description="Breadth/depth of sections and evidence plan (0..1)",
     )
     faithfulness: float = Field(
-        ..., ge=0, le=1, description="Likelihood that planned content will be accurate (0..1)"
+        ...,
+        ge=0,
+        le=1,
+        description="Likelihood that planned content will be accurate (0..1)",
     )
     overall: float = Field(
         ..., ge=0, le=1, description="Holistic preview quality, not an average (0..1)"
@@ -29,7 +40,9 @@ class JudgeVerdict(BaseModel):
     """Judge output: a single winner and per-candidate scores."""
 
     winner_index: int = Field(
-        ..., ge=0, description="Index of the winning candidate (must be a single winner)"
+        ...,
+        ge=0,
+        description="Index of the winning candidate (must be a single winner)",
     )
     scores: list[JudgeScores] = Field(
         description="List of scores for each candidate preview, by index"
@@ -44,6 +57,7 @@ class PreviewOutcome(BaseModel):
 
 
 # ==== Enums and shared constants for the parallel agents package ====
+
 
 class Strategy(StrEnum):
     """Selection strategy for choosing/ordering candidate agents."""
@@ -97,5 +111,3 @@ __all__ = [
     "AnnotationType",
     "DELTA_DATA_TYPE_SUBSTRINGS",
 ]
-
-

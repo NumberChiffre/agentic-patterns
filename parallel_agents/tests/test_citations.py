@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-import pytest
 
-from src.citations import normalize_url, dedupe_citations, merge_and_dedupe, extract_citations_from_text
+from src.citations import (
+    normalize_url,
+    dedupe_citations,
+    merge_and_dedupe,
+    extract_citations_from_text,
+)
 
 
 def test_normalize_url_basic_rules() -> None:
@@ -44,5 +48,3 @@ def test_extract_citations_from_text_markdown_and_bare_urls() -> None:
     cites = extract_citations_from_text(text)
     assert len(cites) == 1
     assert cites[0]["url"] == "https://example.com/p?a=1"
-
-

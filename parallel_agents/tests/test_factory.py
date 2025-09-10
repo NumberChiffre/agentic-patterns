@@ -24,5 +24,3 @@ def test_make_judge_sets_output_type() -> None:
     judge = make_judge(model="gpt-FAKE", instructions="judge")
     assert judge.name == "Judge"
     assert judge.output_type is JudgeVerdict
-
-

@@ -22,12 +22,10 @@ FULL_RUN_INSTRUCTIONS_TEMPLATE: str = (
 )
 
 JUDGE_INSTRUCTIONS_TEMPLATE: str = (
-    'You are judging {num_candidates} candidate previews.\n'
+    "You are judging {num_candidates} candidate previews.\n"
     'Respond with ONLY valid JSON: {{"winner_index": <int>, "scores": '
     ' [{{"index":<int>,"relevance":0..1,"coverage":0..1,"faithfulness":0..1,"overall":0..1}}, ...]}}\n'
-    'Scoring guidance: relevance=answers query directly; coverage=breadth/depth of planned sections and evidence; '
-    'faithfulness=likely to be accurate given the plan; overall=holistic quality. Select a SINGLE best winner. '
-    'Base judgment ONLY on preview quality, not on model identity.'
+    "Scoring guidance: relevance=answers query directly; coverage=breadth/depth of planned sections and evidence; "
+    "faithfulness=likely to be accurate given the plan; overall=holistic quality. Select a SINGLE best winner. "
+    "Base judgment ONLY on preview quality, not on model identity."
 )
-
-

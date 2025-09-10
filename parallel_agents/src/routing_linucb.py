@@ -11,11 +11,17 @@ import numpy as np
 class _ArmState:
     # LinUCB with ridge regression and Sherman–Morrison updates
     A_inv: np.ndarray  # shape (d, d)
-    b: np.ndarray      # shape (d,)
+    b: np.ndarray  # shape (d,)
 
 
 class LinUCBRouter:
-    def __init__(self, d: int, alpha: float = 1.5, ridge_lambda: float = 1e-2, state_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        d: int,
+        alpha: float = 1.5,
+        ridge_lambda: float = 1e-2,
+        state_path: Path | None = None,
+    ) -> None:
         if d <= 0:
             raise ValueError("d must be > 0")
         self.d = d
@@ -43,15 +49,17 @@ class LinUCBRouter:
         ordered_arms = list(arms)
         for arm in ordered_arms:
             self._ensure(arm)
-        A_invs = np.stack([self._arms[a].A_inv for a in ordered_arms], axis=0)  # (n, d, d)
-        bs = np.stack([self._arms[a].b for a in ordered_arms], axis=0)          # (n, d)
+        A_invs = np.stack(
+            [self._arms[a].A_inv for a in ordered_arms], axis=0
+        )  # (n, d, d)
+        bs = np.stack([self._arms[a].b for a in ordered_arms], axis=0)  # (n, d)
         # theta_i = A_inv_i @ b_i  → (n, d)
         theta = (A_invs @ bs[..., None]).squeeze(-1)
         # mean_i = x^T theta_i → (n,)
         means = theta @ x_vec
         # Ax_i = A_inv_i @ x → (n, d); var_i = x^T Ax_i → (n,)
         Ax = A_invs @ x_vec
-        vars_ = np.einsum('nd, d -> n', Ax, x_vec)
+        vars_ = np.einsum("nd, d -> n", Ax, x_vec)
         vars_ = np.maximum(0.0, vars_)
         ucbs = self.alpha * np.sqrt(vars_)
         scores = means + ucbs
@@ -80,6 +88,16 @@ class LinUCBRouter:
         st.b = st.b + (reward * x_vec)
         self._save()
 
+    def bulk_update(self, x: list[float], rewards: dict[str, float]) -> None:
+        if len(x) != self.d:
+            raise ValueError("feature dimension mismatch")
+        for arm, r in rewards.items():
+            try:
+                self.update(x, arm, float(r))
+            except Exception:
+                # Continue updating other arms even if one fails
+                continue
+
     def _save(self) -> None:
         if not self.state_path:
             return
@@ -99,5 +117,3 @@ class LinUCBRouter:
             A_inv = np.asarray(st["A_inv"], dtype=np.float64)
             b = np.asarray(st["b"], dtype=np.float64)
             self._arms[arm] = _ArmState(A_inv=A_inv, b=b)
-
-

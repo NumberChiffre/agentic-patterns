@@ -35,3 +35,19 @@ def test_linucb_feature_dim_mismatch(tmp_path: Path) -> None:
         pass
 
 
+def test_linucb_bulk_update(tmp_path: Path) -> None:
+    state_file = tmp_path / "router_state.json"
+    router = LinUCBRouter(d=2, alpha=1.0, ridge_lambda=1e-2, state_path=state_file)
+
+    arms = ["a", "b", "c"]
+    x = [0.2, 0.8]
+    sel = router.select(x, arms, k=3)
+    assert set(sel) == set(arms)
+
+    rewards = {"a": 1.0, "b": 0.5, "c": 0.0}
+    router.bulk_update(x, rewards)
+
+    # After bulk update, state file should exist and selection is still valid
+    sel2 = router.select(x, arms, k=2)
+    assert len(sel2) == 2
+    assert state_file.exists()

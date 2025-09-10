@@ -112,5 +112,3 @@ def clean_citations_for_export(citations: list[dict]) -> list[dict]:
         seen.add(url)
         cleaned.append({"title": _domain_from_url(url), "url": url})
     return cleaned
-
-

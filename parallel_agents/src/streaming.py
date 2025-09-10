@@ -12,13 +12,13 @@ from tenacity import (
 )
 
 import weave
+import time
 from src.types import (
     AnnotationType,
     DELTA_DATA_TYPE_SUBSTRINGS,
     RawDataCategory,
     StreamEventType,
 )
-import time
 
 
 logger = logging.getLogger(__name__)
@@ -30,7 +30,9 @@ def _count_tokens(s: str) -> int:
 
 @weave.op
 async def agentsdk_text_stream(agent: Agent, prompt: str) -> AsyncIterator[str]:
-    stream = Runner.run_streamed(agent, prompt, run_config=RunConfig(tracing_disabled=True))
+    stream = Runner.run_streamed(
+        agent, prompt, run_config=RunConfig(tracing_disabled=True)
+    )
     async for ev in stream.stream_events():
         ev_type = str(getattr(ev, "type", ""))
 
@@ -55,14 +57,18 @@ async def agentsdk_text_stream(agent: Agent, prompt: str) -> AsyncIterator[str]:
             elif RawDataCategory.WEB_SEARCH_CALL in data_type_str:
                 try:
                     if RawDataCategory.COMPLETED in data_type_str:
-                        if hasattr(data, "item") and hasattr(data.item, "web_search_result"):
+                        if hasattr(data, "item") and hasattr(
+                            data.item, "web_search_result"
+                        ):
                             search_result = data.item.web_search_result
                             if hasattr(search_result, "results"):
                                 for r in search_result.results:
                                     url = getattr(r, "url", "")
                                     title = getattr(r, "title", "")
                                     if url and title:
-                                        logger.info(f"🔗 Citation found: {title} - {url}")
+                                        logger.info(
+                                            f"🔗 Citation found: {title} - {url}"
+                                        )
                         if hasattr(data, "results"):
                             for r in data.results:
                                 url = getattr(r, "url", "")
@@ -75,16 +81,26 @@ async def agentsdk_text_stream(agent: Agent, prompt: str) -> AsyncIterator[str]:
             elif RawDataCategory.ANNOTATION_ADDED in data_type_str:
                 try:
                     ann = getattr(data, "annotation", None)
-                    if isinstance(ann, dict) and ann.get("type") == AnnotationType.URL_CITATION:
+                    if (
+                        isinstance(ann, dict)
+                        and ann.get("type") == AnnotationType.URL_CITATION
+                    ):
                         title = str(ann.get("title", ""))
                         url = str(ann.get("url", ""))
                         if url and title:
-                            logger.info(f"🔗 Citation found (annotation): {title} - {url}")
-                    elif hasattr(ann, "type") and getattr(ann, "type", "") == AnnotationType.URL_CITATION:
+                            logger.info(
+                                f"🔗 Citation found (annotation): {title} - {url}"
+                            )
+                    elif (
+                        hasattr(ann, "type")
+                        and getattr(ann, "type", "") == AnnotationType.URL_CITATION
+                    ):
                         title = str(getattr(ann, "title", ""))
                         url = str(getattr(ann, "url", ""))
                         if url and title:
-                            logger.info(f"🔗 Citation found (annotation): {title} - {url}")
+                            logger.info(
+                                f"🔗 Citation found (annotation): {title} - {url}"
+                            )
                 except Exception as ann_err:  # noqa: BLE001
                     logger.debug(f"Annotation parse skipped: {ann_err}")
 
@@ -96,13 +112,13 @@ async def agentsdk_text_stream(agent: Agent, prompt: str) -> AsyncIterator[str]:
                     yield t
 
 
-@weave.op
 @retry(
     retry=retry_if_exception_type(Exception),
     wait=wait_exponential_jitter(initial=0.2, max=3.0),
     stop=stop_after_attempt(5),
     reraise=True,
 )
+@weave.op
 async def stream_response(
     agent: Agent,
     prompt: str,
@@ -128,14 +144,18 @@ async def stream_response(
             # token increments are visible via logs and op output
             if token_count - last_logged >= log_every_tokens:
                 if stop_after_tokens:
-                    logger.info(f"{agent.name}: {token_count}/{stop_after_tokens} tokens")
+                    logger.info(
+                        f"{agent.name}: {token_count}/{stop_after_tokens} tokens"
+                    )
                 else:
                     logger.info(f"{agent.name}: {token_count} tokens streamed")
                 last_logged = token_count
             if stop_after_tokens and token_count >= stop_after_tokens:
-                logger.info(f"{agent.name}: Reached {token_count} tokens, stopping early")
+                logger.info(
+                    f"{agent.name}: Reached {token_count} tokens, stopping early"
+                )
                 break
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         raise
     finally:
         elapsed = time.perf_counter() - start_time
@@ -144,6 +164,7 @@ async def stream_response(
                 f"{agent.name}: Preview complete - {token_count} tokens, {len(''.join(buf))} chars, {elapsed:.2f}s"
             )
         else:
-            logger.info(f"Full answer streaming complete - approximately {token_count} tokens")
+            logger.info(
+                f"Full answer streaming complete - approximately {token_count} tokens"
+            )
     return token_count, ("".join(buf).strip() if capture_text else "")
-

@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 
-
 # Install a minimal fake 'agents' package into sys.modules BEFORE tests import src.*
 import sys
 import types
@@ -53,10 +52,17 @@ class FakeStream:
 
 class FakeRunner:
     @staticmethod
-    def run_streamed(agent: FakeAgent, prompt: str, run_config: FakeRunConfig | None = None) -> FakeStream:
+    def run_streamed(
+        agent: FakeAgent, prompt: str, run_config: FakeRunConfig | None = None
+    ) -> FakeStream:
         # For previews/judge: emit one JSON chunk; for general streaming: emit a few words
         if "winner_index" in prompt or prompt.strip().startswith("{"):
-            events = [_Ev("text_delta_event", "{\"winner_index\": 0, \"scores\": [{\"index\": 0, \"relevance\": 1, \"coverage\": 1, \"faithfulness\": 1, \"overall\": 1}]}")]
+            events = [
+                _Ev(
+                    "text_delta_event",
+                    '{"winner_index": 0, "scores": [{"index": 0, "relevance": 1, "coverage": 1, "faithfulness": 1, "overall": 1}]}',
+                )
+            ]
         else:
             events = [
                 _Ev("text_delta_event", "hello "),
@@ -72,6 +78,3 @@ fake_mod.RunConfig = FakeRunConfig
 fake_mod.Runner = FakeRunner
 fake_mod.WebSearchTool = FakeTool
 sys.modules.setdefault("agents", fake_mod)
-
-
-
