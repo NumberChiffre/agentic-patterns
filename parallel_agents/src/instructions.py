@@ -2,7 +2,7 @@ from __future__ import annotations
 
 PREVIEW_INSTRUCTIONS_TEMPLATE: str = (
     "You are {candidate_label} among {num_candidates} candidates. The user query is provided between <query> tags.\n"
-    "Respond with ONLY valid JSON, concise but descriptive (≤ {max_preview_tokens} tokens). Keys: "
+    "Respond with ONLY valid JSON (no markdown formatting, no code blocks, just raw JSON), concise but descriptive (≤ {max_preview_tokens} tokens). Keys: "
     "['approach','evidence_plan','answer_outline','assumptions','risks','confidence'].\n"
     "- approach: your high-level plan and angle.\n"
     "- evidence_plan: concrete searches you will run using web_search and what evidence you expect.\n"

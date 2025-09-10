@@ -9,6 +9,7 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
+import weave
 from .factory import make_judge
 from .instructions import JUDGE_INSTRUCTIONS_TEMPLATE
 from .streaming import agentsdk_text_stream
@@ -39,6 +40,7 @@ def _extract_json_object(text: str) -> dict[str, object] | None:
     stop=stop_after_attempt(3),
     reraise=True,
 )
+@weave.op
 async def judge_previews(
     query: str,
     previews: list[str],

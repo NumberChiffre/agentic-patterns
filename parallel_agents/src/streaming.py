@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import time
 from collections.abc import AsyncIterator
 
 from agents import Agent, RunConfig, Runner
@@ -12,12 +11,14 @@ from tenacity import (
     wait_exponential_jitter,
 )
 
-from .types import (
+import weave
+from src.types import (
     AnnotationType,
     DELTA_DATA_TYPE_SUBSTRINGS,
     RawDataCategory,
     StreamEventType,
 )
+import time
 
 
 logger = logging.getLogger(__name__)
@@ -27,6 +28,7 @@ def _count_tokens(s: str) -> int:
     return 0 if not s else len(s.split())
 
 
+@weave.op
 async def agentsdk_text_stream(agent: Agent, prompt: str) -> AsyncIterator[str]:
     stream = Runner.run_streamed(agent, prompt, run_config=RunConfig(tracing_disabled=True))
     async for ev in stream.stream_events():
@@ -94,6 +96,7 @@ async def agentsdk_text_stream(agent: Agent, prompt: str) -> AsyncIterator[str]:
                     yield t
 
 
+@weave.op
 @retry(
     retry=retry_if_exception_type(Exception),
     wait=wait_exponential_jitter(initial=0.2, max=3.0),
@@ -107,7 +110,7 @@ async def stream_response(
     stop_after_tokens: int | None = None,
     log_every_tokens: int = 50,
     capture_text: bool = False,
-) -> tuple[int, str | None]:
+) -> tuple[int, str]:
     logger.info(
         f"Starting stream for {agent.name}"
         + (f" with min_tokens={stop_after_tokens}" if stop_after_tokens else " (full)")
@@ -116,26 +119,31 @@ async def stream_response(
     last_logged = 0
     start_time = time.perf_counter()
     buf: list[str] = []
-    async for chunk in agentsdk_text_stream(agent, prompt):
-        inc = _count_tokens(chunk)
-        token_count += inc
-        if capture_text and isinstance(chunk, str) and chunk:
-            buf.append(chunk)
-        if token_count - last_logged >= log_every_tokens:
-            if stop_after_tokens:
-                logger.info(f"{agent.name}: {token_count}/{stop_after_tokens} tokens")
-            else:
-                logger.info(f"{agent.name}: {token_count} tokens streamed")
-            last_logged = token_count
-        if stop_after_tokens and token_count >= stop_after_tokens:
-            logger.info(f"{agent.name}: Reached {token_count} tokens, stopping early")
-            break
-    elapsed = time.perf_counter() - start_time
-    if stop_after_tokens:
-        logger.info(
-            f"{agent.name}: Preview complete - {token_count} tokens, {len(''.join(buf))} chars, {elapsed:.2f}s"
-        )
-    else:
-        logger.info(f"Full answer streaming complete - approximately {token_count} tokens")
-    return token_count, ("".join(buf).strip() if capture_text else None)
+    try:
+        async for chunk in agentsdk_text_stream(agent, prompt):
+            inc = _count_tokens(chunk)
+            token_count += inc
+            if capture_text and isinstance(chunk, str) and chunk:
+                buf.append(chunk)
+            # token increments are visible via logs and op output
+            if token_count - last_logged >= log_every_tokens:
+                if stop_after_tokens:
+                    logger.info(f"{agent.name}: {token_count}/{stop_after_tokens} tokens")
+                else:
+                    logger.info(f"{agent.name}: {token_count} tokens streamed")
+                last_logged = token_count
+            if stop_after_tokens and token_count >= stop_after_tokens:
+                logger.info(f"{agent.name}: Reached {token_count} tokens, stopping early")
+                break
+    except Exception as e:  # noqa: BLE001
+        raise
+    finally:
+        elapsed = time.perf_counter() - start_time
+        if stop_after_tokens:
+            logger.info(
+                f"{agent.name}: Preview complete - {token_count} tokens, {len(''.join(buf))} chars, {elapsed:.2f}s"
+            )
+        else:
+            logger.info(f"Full answer streaming complete - approximately {token_count} tokens")
+    return token_count, ("".join(buf).strip() if capture_text else "")
 

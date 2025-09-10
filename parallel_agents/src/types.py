@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
@@ -37,11 +36,11 @@ class JudgeVerdict(BaseModel):
     )
 
 
-@dataclass
-class PreviewOutcome:
+class PreviewOutcome(BaseModel):
     name: str
     text: str
     tokens: int
+    latency_s: float | None = None
 
 
 # ==== Enums and shared constants for the parallel agents package ====

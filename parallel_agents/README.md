@@ -49,7 +49,9 @@ Key arguments:
 ```bash
 uv run parallel-agents "What are the key risks and mitigations of LLM hallucinations in production?" \
   --judge-model gpt-4o \
-  --agent-models "gpt-4o,gpt-4o-mini"
+  --agent-models "gpt-4o,gpt-4o-mini" \
+  --strategy bandit \
+  --wandb
 ```
 
 6) Full bandit example

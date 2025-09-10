@@ -5,12 +5,12 @@ from agents import Agent, WebSearchTool
 from .types import JudgeVerdict
 
 
-def make_candidate(name: str, model: str, instructions: str, tools: list[object] | None = None) -> Agent:
+def make_candidate(name: str, model: str, instructions: str, tools: list[object] | None = None, enable_web_search: bool = True) -> Agent:
     return Agent(
         name=name,
         model=model,
         instructions=instructions,
-        tools=tools or [WebSearchTool()],
+        tools=tools if tools is not None else ([WebSearchTool()] if enable_web_search else []),
     )
 
 
