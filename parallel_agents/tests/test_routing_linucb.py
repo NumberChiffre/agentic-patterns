@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 
-from src.routing_linucb import LinUCBRouter
+from src.routing.routing_linucb import LinUCBRouter
 
 
 def test_linucb_select_and_update(tmp_path: Path) -> None:

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.race import race_with_judge_and_stream
-from src.types import Strategy
+from src.race.race import race_with_judge_and_stream
+from src.core.types import Strategy
 
 
 @pytest.mark.asyncio

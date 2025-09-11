@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 
-from src.citations import (
+from src.utils.citations import (
     normalize_url,
     dedupe_citations,
     merge_and_dedupe,

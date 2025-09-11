@@ -13,9 +13,9 @@ import wandb
 from agents import set_trace_processors
 from weave.integrations.openai_agents.openai_agents import WeaveTracingProcessor
 
-from .race.race import race_with_judge_and_stream
-from .core.types import Strategy
-from .utils.citations import clean_citations_for_export
+from ..race.race import race_with_judge_and_stream
+from ..core.types import Strategy
+from .citations import clean_citations_for_export
 
 
 load_dotenv()

@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import pytest
 
-from src.judge import _extract_json_object, judge_previews, compute_candidate_order
-from src.types import JudgeVerdict, JudgeScores
+from src.judging.judge import _extract_json_object, judge_previews, compute_candidate_order
+from src.core.types import JudgeVerdict, JudgeScores
 
 
 def test_extract_json_object_variants() -> None:

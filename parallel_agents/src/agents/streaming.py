@@ -13,7 +13,7 @@ from tenacity import (
 
 import weave
 import time
-from src.types import (
+from ..core.types import (
     AnnotationType,
     DELTA_DATA_TYPE_SUBSTRINGS,
     RawDataCategory,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from agents import Agent, WebSearchTool
 
-from .types import JudgeVerdict
+from ..core.types import JudgeVerdict
 
 
 def make_candidate(

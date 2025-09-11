@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from src.factory import make_candidate, make_full, make_judge
-from src.types import JudgeVerdict
+from src.agents.factory import make_candidate, make_full, make_judge
+from src.core.types import JudgeVerdict
 
 
 def test_make_candidate_uses_web_search_tool_by_default() -> None:
