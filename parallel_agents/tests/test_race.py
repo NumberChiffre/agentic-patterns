@@ -18,6 +18,8 @@ async def test_race_with_judge_and_stream_baseline() -> None:
     assert 0 <= idx < 2
     assert isinstance(agent_name, str) and agent_name
     assert isinstance(debug, dict)
+    assert "latencies_s" in debug
+    assert "fallback_failed_indices" in debug
 
 
 @pytest.mark.asyncio
@@ -33,3 +35,5 @@ async def test_race_with_judge_and_stream_bandit() -> None:
     assert 0 <= idx < 2
     assert isinstance(agent_name, str) and agent_name
     assert isinstance(debug, dict)
+    assert "latencies_s" in debug
+    assert "fallback_failed_indices" in debug

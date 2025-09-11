@@ -3,6 +3,7 @@ from __future__ import annotations
 from enum import StrEnum
 
 from pydantic import BaseModel, Field
+from typing import Protocol, runtime_checkable
 
 
 class JudgeScores(BaseModel):
@@ -110,4 +111,69 @@ __all__ = [
     "RawDataCategory",
     "AnnotationType",
     "DELTA_DATA_TYPE_SUBSTRINGS",
+    "Router",
+    "FeatureExtractor",
+    "RewardPolicy",
 ]
+
+
+class RaceTuning(BaseModel):
+    """Tuning parameters to make `race_with_judge_and_stream` production-ready and explicit.
+
+    All time-like values are seconds; all ratios are in [0,1].
+    """
+
+    adaptive_min_tokens_min_scale: float = Field(
+        0.75,
+        ge=0.1,
+        le=4.0,
+        description="Lower multiplier bound for adaptive preview tokens",
+    )
+    adaptive_min_tokens_max_scale: float = Field(
+        1.50,
+        ge=0.1,
+        le=8.0,
+        description="Upper multiplier bound for adaptive preview tokens",
+    )
+    latency_bias_scale: float = Field(
+        0.05,
+        ge=0.0,
+        le=1.0,
+        description="Magnitude of negative bias added to slower arms during selection",
+    )
+    speculative_min_query_length: int = Field(
+        2000,
+        ge=1,
+        description="Query length threshold to enable speculative top-2 full stage",
+    )
+    log_every_preview_tokens: int = Field(
+        20, ge=1, description="Logging cadence during preview streaming"
+    )
+    log_every_full_tokens: int = Field(
+        50, ge=1, description="Logging cadence during full streaming"
+    )
+
+
+# === Tier 0 Protocols ===
+
+
+@runtime_checkable
+class Router(Protocol):
+    def select(self, x: list[float], arms: list[str], k: int = 1) -> list[str]: ...
+
+    def bulk_update(self, x: list[float], rewards: dict[str, float]) -> None: ...
+
+
+@runtime_checkable
+class FeatureExtractor(Protocol):
+    def compute(self, query: str) -> list[float]: ...
+
+
+@runtime_checkable
+class RewardPolicy(Protocol):
+    def compose(
+        self,
+        preview_tokens: list[int],
+        judge_overall: list[float],
+        cost_terms: list[float] | None = None,
+    ) -> list[float]: ...

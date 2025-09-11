@@ -3,14 +3,15 @@ from __future__ import annotations
 import logging
 from collections.abc import AsyncIterator
 
-from agents import Agent, RunConfig, Runner
+from agents import Agent, Runner
+import contextlib as _ctx
+import contextlib
 from tenacity import (
     retry,
     retry_if_exception_type,
     stop_after_attempt,
     wait_exponential_jitter,
 )
-
 import weave
 import time
 from ..core.types import (
@@ -19,6 +20,10 @@ from ..core.types import (
     RawDataCategory,
     StreamEventType,
 )
+
+
+def agents_custom_span(_name: str):
+    return _ctx.nullcontext()
 
 
 logger = logging.getLogger(__name__)
@@ -30,9 +35,7 @@ def _count_tokens(s: str) -> int:
 
 @weave.op
 async def agentsdk_text_stream(agent: Agent, prompt: str) -> AsyncIterator[str]:
-    stream = Runner.run_streamed(
-        agent, prompt, run_config=RunConfig(tracing_disabled=True)
-    )
+    stream = Runner.run_streamed(agent, prompt)
     async for ev in stream.stream_events():
         ev_type = str(getattr(ev, "type", ""))
 
@@ -126,6 +129,7 @@ async def stream_response(
     stop_after_tokens: int | None = None,
     log_every_tokens: int = 50,
     capture_text: bool = False,
+    phase: str | None = None,
 ) -> tuple[int, str]:
     logger.info(
         f"Starting stream for {agent.name}"
@@ -136,25 +140,31 @@ async def stream_response(
     start_time = time.perf_counter()
     buf: list[str] = []
     try:
-        async for chunk in agentsdk_text_stream(agent, prompt):
-            inc = _count_tokens(chunk)
-            token_count += inc
-            if capture_text and isinstance(chunk, str) and chunk:
-                buf.append(chunk)
-            # token increments are visible via logs and op output
-            if token_count - last_logged >= log_every_tokens:
-                if stop_after_tokens:
+        span_ctx = (
+            agents_custom_span(phase)
+            if isinstance(phase, str) and phase
+            else contextlib.nullcontext()
+        )
+        with span_ctx:
+            async for chunk in agentsdk_text_stream(agent, prompt):
+                inc = _count_tokens(chunk)
+                token_count += inc
+                if capture_text and isinstance(chunk, str) and chunk:
+                    buf.append(chunk)
+                # token increments are visible via logs and op output
+                if token_count - last_logged >= log_every_tokens:
+                    if stop_after_tokens:
+                        logger.info(
+                            f"{agent.name}: {token_count}/{stop_after_tokens} tokens"
+                        )
+                    else:
+                        logger.info(f"{agent.name}: {token_count} tokens streamed")
+                    last_logged = token_count
+                if stop_after_tokens and token_count >= stop_after_tokens:
                     logger.info(
-                        f"{agent.name}: {token_count}/{stop_after_tokens} tokens"
+                        f"{agent.name}: Reached {token_count} tokens, stopping early"
                     )
-                else:
-                    logger.info(f"{agent.name}: {token_count} tokens streamed")
-                last_logged = token_count
-            if stop_after_tokens and token_count >= stop_after_tokens:
-                logger.info(
-                    f"{agent.name}: Reached {token_count} tokens, stopping early"
-                )
-                break
+                    break
     except Exception:  # noqa: BLE001
         raise
     finally:

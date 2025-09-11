@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from src.agents.streaming import agentsdk_text_stream, stream_response
+from src.runtime.streaming import agentsdk_text_stream, stream_response
 
 
 @pytest.mark.asyncio

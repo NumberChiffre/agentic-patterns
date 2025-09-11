@@ -6,6 +6,6 @@ from .citations import (
 
 __all__ = [
     "extract_citations_from_text",
-    "merge_and_dedupe", 
+    "merge_and_dedupe",
     "clean_citations_for_export",
 ]

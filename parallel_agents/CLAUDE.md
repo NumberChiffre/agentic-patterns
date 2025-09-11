@@ -2,7 +2,7 @@
 
 ## General checks
 - Python 3.12 type hinting without typing package reliance, if anything remove them never include them in any of the code.
-- Avoid any docstring in the code unless specified or comments.s
+- Avoid any docstring in the code unless specified or comments.
 - Always use pydantic model whenever structured output is required, use it across the entire repo and do not use any dataclasses.
 - Use Enum type when needed, avoid using strings and constants.
 - Package imports on top of python modules, never within any function or classes.
@@ -12,3 +12,7 @@
 - Consolidate common patterns into reusable utility functions to avoid code duplication.
 - When working with external APIs, implement dynamic error handling rather than hardcoding model-specific behavior.
 - Group related functionality in logical modules (e.g., agent utilities in agents_research.py, core services in services.py).
+
+## Functional Programming
+- Whenever possible use functions as opposed to create OOP, much cleaner to read and we probably don't need all that inheritance and design patterns, unless otherwise specified for specific use cases.
+- Functions should be correctly decoupled when too complex within common python modules.

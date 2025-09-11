@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.agents.factory import make_candidate, make_full, make_judge
+from src.runtime.factory import make_candidate, make_full, make_judge
 from src.core.types import JudgeVerdict
 
 

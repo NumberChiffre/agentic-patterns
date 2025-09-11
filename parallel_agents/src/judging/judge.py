@@ -10,9 +10,9 @@ from tenacity import (
 )
 
 import weave
-from ..agents.factory import make_judge
+from ..runtime.factory import make_judge
 from ..core.instructions import JUDGE_INSTRUCTIONS_TEMPLATE
-from ..agents.streaming import agentsdk_text_stream
+from ..runtime.streaming import agentsdk_text_stream
 from ..core.types import JudgeVerdict
 
 logger = logging.getLogger(__name__)

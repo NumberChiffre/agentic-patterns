@@ -46,6 +46,15 @@ uv run parallel-agents "What are the key risks and mitigations of LLM hallucinat
   --strategy bandit
 ```
 
+#### Verify (Tier 1) — default command
+
+After implementing Tier 1, use this command to verify lint, format, and tests:
+
+```bash
+cd parallel_agents && uv sync && \
+uv run ruff check . && uv run ruff format --check . && uv run pytest -q
+```
+
 6) Full bandit example
 
 ```bash
@@ -64,26 +73,55 @@ uv run parallel-agents "Summarize the latest evidence for outpatient UTI managem
 
 Notes:
 - An entry point is installed as `parallel-agents` (via `pyproject.toml`). You can also run `uv run python -m src.cli ...`.
-- Bandit state persists to `.router_state.json` by default; delete it to reset learning.
+- Router state persistence:
+  - If `REDIS_URL` is set, router state persists in Redis under `ROUTER_STATE_KEY` (default: `router_state`).
+  - If `--bandit-state` points to a file, JSON persistence is also used (for portability). Delete it to reset local learning.
+
+### Optional: Redis preview cache
+
+You can enable a lightweight Redis cache for preview responses to reduce cost and latency on repeat queries.
+
+1) Run Redis locally (or use a managed instance):
+
+```bash
+brew install redis
+brew services start redis
+# or docker run -p 6379:6379 redis:7
+```
+
+2) Add the following to your `.env`:
+
+```bash
+REDIS_URL=redis://localhost:6379/0
+# Optional TTL (seconds) for preview cache entries (default: 600)
+PREVIEW_CACHE_TTL=600
+```
+
+When `REDIS_URL` is set, the orchestrator will:
+- Attempt to read previews from Redis before calling models
+- Write preview results into Redis with a TTL after generation
+- Fall back to direct generation if the cache is disabled or a miss occurs
+
+Implementation: see `src/services/cache_redis.py` and usage in `src/race/race.py`.
 
 ### System Architecture
 
 ```mermaid
 flowchart LR
   %% Inputs/Config
-  subgraph INPUTS["Inputs & Config"]
+  subgraph INPUTS["Inputs & Config (env + CLI)"]
     U["User Query"]
-    CFG["agent_models (M) judge_model (J) min_preview_tokens (T) strategy (baseline|bandit)"]
+    CFG["agent_models, judge_model, min_preview_tokens, strategy\nalpha, ridge, weights, adaptive scales, latency bias, speculative threshold"]
   end
 
   %% Orchestrator
-  subgraph ORCH["Orchestrator"]
-    OR["Orchestration (coordinate flow)"]
+  subgraph ORCH["Orchestrator (race.py)"]
+    OR["Coordinate flow"]
   end
 
   %% Candidate workers (fan-out/fan-in)
   subgraph CANDS["Candidate Agents (Parallel × N)"]
-    PREV["Fan-out: Previews until threshold T"]
+    PREV["Fan-out: Previews until threshold T_adaptive"]
     GATH["Fan-in: Gather all previews"]
   end
 
@@ -92,11 +130,25 @@ flowchart LR
     JPRE["Judge & Rank"]
   end
 
-  %% Full-answer with fallback cascade
-  subgraph FULL["Answer Generation + Fallback"]
+  %% Full-answer with fallback + speculative
+  subgraph FULL["Answer Generation"]
     ORDER["Order by score (winner first)"]
+    SPEC["Speculative top-2 (for long queries)"]
     TRY{"Winner first; on error try next"}
     STREAM["Final Answer (streaming)"]
+  end
+
+  %% Routing and State
+  subgraph ROUTE["Routers"]
+    BASE["BaselineRouter"]
+    LNUCB["LinUCBRouter (with latency bias)"]
+  end
+
+  subgraph STATE["State & Metrics"]
+    SREDIS["Router State (Redis JSON)"]
+    SFILE["Router State (File JSON)"]
+    METR["Preview Latency Metrics (p95)"]
+    PCACHE["Preview Cache (Redis)"]
   end
 
   %% External services
@@ -105,54 +157,148 @@ flowchart LR
     WS["Web Search Tools"]
   end
 
-  %% Observability
-  subgraph OBS["Observability"]
-    LOG["Logs"]
-    MET["Metrics"]
-    TRC["Tracing"]
-  end
-
   %% Flow
   U --> OR
   CFG --> OR
   OR -->|baseline| PREV
-  OR -->|bandit| RTR[Contextual Bandit Router]
-  RTR -.-> NB[Bandit learns from per-query features and judge outcomes]
-  RTR --> PREV
+  OR -->|bandit| ROUTE
+  ROUTE --> PREV
   PREV --> GATH
   GATH --> JPRE
   JPRE --> ORDER
+  ORDER --> SPEC
+  SPEC --> STREAM
   ORDER --> TRY
   TRY -->|success| STREAM
   TRY -->|failure| TRY
   STREAM --> U
 
-  %% External interactions
+  %% Caches & metrics
+  PREV -.-> PCACHE
   PREV -.-> LLM
   PREV -.-> WS
   STREAM -.-> LLM
   STREAM -.-> WS
+  PREV -.-> METR
+  METR -.-> ROUTE
 
-  %% Retries/backoff surfaces
-  R1["tenacity retry (preview/judge)"]
-  R2["retry APIError (full)"]
-  PREV -.-> R1
-  JPRE -.-> R1
-  STREAM -.-> R2
-
-  %% Observability taps
-  OR -.-> LOG
-  PREV -.-> LOG
-  JPRE -.-> LOG
-  STREAM -.-> LOG
+  %% State persistence
+  ROUTE <--> SREDIS
+  ROUTE <--> SFILE
 ```
 
-### Why bandit routing (and when to use it)
+### Interfaces & Components (Tier 0)
 
-- **Better first choice**: LinUCB ranks candidate models by expected reward for the current query (context features like normalized length, and can be extended to intent/safety/health cues).
-- **Lower tail latency**: Higher probability the first model produces the final answer reduces fallback attempts, shrinking end-to-end p95/p99.
-- **Lower cost**: Fewer retries and bounded exploration via `alpha` and `ridge` lower tokens and $/resolved.
-- **Drift resilience**: Traffic shifts as providers change quality/latency; state persists across runs.
+```mermaid
+flowchart LR
+  subgraph IFACE[Interfaces]
+    RIF[Router]
+    FIF[FeatureExtractor]
+    RPIF[RewardPolicy]
+    SSTORE[StateStore]
+    PCACHE[PreviewCache]
+  end
+
+  subgraph IMPL[Implementations]
+    BASE[BaselineRouter]
+    LNUCB[LinUCBRouter]
+    LENF[LengthFeatures]
+    EMBF[EmbeddingFeatures]
+    SREDIS[Redis State]
+    SFILE[File State]
+    RCACHE[Redis Preview Cache]
+  end
+
+  RIF --> BASE
+  RIF --> LNUCB
+  FIF --> LENF
+  FIF --> EMBF
+  SSTORE --> SREDIS
+  SSTORE --> SFILE
+  PCACHE --> RCACHE
+```
+
+### End-to-End Sequence (with Bandit + Judge)
+
+```mermaid
+sequenceDiagram
+  participant U as User
+  participant OR as Orchestrator
+  participant RT as Router
+  participant AG as Agents (N)
+  participant JD as Judge
+  participant ST as StateStore (Redis/File)
+  participant MC as Metrics (Latency)
+
+  U->>OR: Query
+  OR->>RT: select(context features)
+  RT->>ST: load(state)
+  RT-->>OR: ordered models
+  par Previews
+    OR->>AG: stream preview (T_adaptive)
+    AG-->>OR: preview text
+    OR->>MC: record latency
+  end
+  OR->>JD: judge(previews)
+  JD-->>OR: scores & winner
+  alt long query
+    OR->>AG: speculative top-2 full
+    AG-->>OR: first completed full
+  else
+    OR->>AG: full for winner else fallback
+    AG-->>OR: full
+  end
+  OR->>RT: bulk_update(reward)
+  RT->>ST: save(state)
+  OR-->>U: final answer
+```
+
+### State & Metrics
+
+```mermaid
+flowchart TD
+  subgraph ROUTE[Routing]
+    X[Context features x]
+    POL[LinUCB Policy]
+    DEC[Decay]
+  end
+  subgraph STORE[Persistence]
+    R[Redis: router_state]
+    F[File: .router_state.json]
+  end
+  subgraph MET[Metrics]
+    L95[p95 preview latency per model]
+  end
+
+  X --> POL --> DEC --> R
+  POL --> F
+  L95 --> POL
+```
+
+### Configuration (env + CLI)
+
+- Core env: `OPENAI_API_KEY`, `REDIS_URL`, `ROUTER_STATE_KEY`
+- Bandit env defaults: `BANDIT_ALPHA`, `BANDIT_RIDGE`, `BANDIT_STATE`, `BANDIT_LENGTH_THRESHOLD`, `BANDIT_QUALITY_WEIGHT`, `BANDIT_SPEED_WEIGHT`, `BANDIT_FALLBACK_PENALTY`, `LATENCY_BIAS_SCALE`, `ADAPTIVE_MIN_SCALE`, `ADAPTIVE_MAX_SCALE`, `SPECULATIVE_MIN_QUERY_LENGTH`
+- Preview cache: `PREVIEW_CACHE_TTL`
+
+### Why bandit routing (with a judge already in place)
+
+- **Roles are different**:
+  - **Judge on previews**: scores all candidates’ previews and determines the best content plan (quality selection). This protects final answer quality regardless of order.
+  - **Bandit router**: chooses the order to attempt full generations so we hit the likely winner first (efficiency selection). This cuts retries and tail latency.
+
+- **What bandit guarantees (intuitively)**:
+  - Compared to any fixed order, LinUCB’s UCB policy increases the probability that the first attempted model is the same one the judge would ultimately prefer for similar queries (higher first-try success).
+  - With continued traffic, uncertainty shrinks and the policy converges to context-specific best ordering; cumulative regret grows sublinearly. In practice this means fewer fallbacks over time.
+  - Final quality is not degraded: if the first attempt fails or underperforms, the fallback cascade still tries the next best according to the judge.
+
+- **Why it’s needed even with judging**:
+  - The judge only tells us which candidate is best after seeing all previews. We still must choose which model to run first for the full answer. Without bandit learning, that choice is arbitrary or static.
+  - Learning the mapping from simple context features (e.g., length) to “which model tends to win judging and succeed” reduces expected retries, lowering E2E p95/p99 and cost.
+
+- **Measurable effects (what to track)**:
+  - First-try success rate ↑; retries per run ↓; E2E p95/p99 ↓; tokens per run ↓; $/resolved ↓.
+  - Exploration rate ↓ over time as state accumulates; traffic adapts to provider drift.
 
 Details and instrumentation:
 - **LinUCB scoring (supports "better first choice")**
@@ -271,6 +417,6 @@ Use current evidence-based guidelines, tailor recommendations to patient factors
 - Adapts to provider drift and incidents by shifting traffic, while preserving exploration.
 
 #### Implementation notes
-- LinUCB with Sherman–Morrison updates and JSON persistence in `src/routing_linucb.py`.
-- Unified orchestrator: `src/race.py` with `--strategy baseline|bandit` switch.
+- LinUCB with Sherman–Morrison updates and JSON persistence in `src/routing/routing_linucb.py`.
+- Unified orchestrator: `src/race/race.py` with `--strategy baseline|bandit` switch.
 - CLI flag `--strategy baseline|bandit` to switch without code changes.

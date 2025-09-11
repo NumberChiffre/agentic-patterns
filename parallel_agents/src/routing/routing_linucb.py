@@ -5,6 +5,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
+from ..services.state_redis import router_state_load, router_state_save
+
+STATE_VERSION = 1
 
 
 @dataclass
@@ -29,8 +32,13 @@ class LinUCBRouter:
         self.ridge_lambda = float(ridge_lambda)
         self.state_path = state_path
         self._arms: dict[str, _ArmState] = {}
+        # Try file state first when provided; otherwise, Redis-backed state if available
         if state_path and state_path.exists():
             self._load()
+        else:
+            data = router_state_load(self.d)
+            if data:
+                self._load_from_payload(data)
 
     def _ensure(self, arm: str) -> None:
         if arm in self._arms:
@@ -41,7 +49,14 @@ class LinUCBRouter:
         b = np.zeros(self.d, dtype=np.float64)
         self._arms[arm] = _ArmState(A_inv=A_inv, b=b)
 
-    def select(self, x: list[float], arms: list[str], k: int = 1) -> list[str]:
+    def select(
+        self,
+        x: list[float],
+        arms: list[str],
+        k: int = 1,
+        *,
+        arm_bias: dict[str, float] | None = None,
+    ) -> list[str]:
         if len(x) != self.d:
             raise ValueError("feature dimension mismatch")
         x_vec = np.asarray(x, dtype=np.float64)
@@ -62,7 +77,12 @@ class LinUCBRouter:
         vars_ = np.einsum("nd, d -> n", Ax, x_vec)
         vars_ = np.maximum(0.0, vars_)
         ucbs = self.alpha * np.sqrt(vars_)
-        scores = means + ucbs
+        # Optional per-arm bias (e.g., latency penalty) added to scores
+        if arm_bias:
+            bias_vec = np.asarray([float(arm_bias.get(a, 0.0)) for a in ordered_arms])
+        else:
+            bias_vec = np.zeros_like(means)
+        scores = means + ucbs + bias_vec
         # Top-k indices (descending)
         k_eff = max(1, min(k, scores.shape[0]))
         top_indices = np.argpartition(-scores, k_eff - 1)[:k_eff]
@@ -98,22 +118,61 @@ class LinUCBRouter:
                 # Continue updating other arms even if one fails
                 continue
 
-    def _save(self) -> None:
-        if not self.state_path:
+    def decay(self, factor: float) -> None:
+        """Apply exponential decay to accumulated evidence to adapt to drift.
+
+        factor in (0,1]: lower means faster forgetting.
+        """
+        f = float(factor)
+        if f <= 0:
             return
+        for st in self._arms.values():
+            st.A_inv = st.A_inv / f
+            st.b = st.b * f
+        self._save()
+
+    def _save(self) -> None:
         payload = {
-            arm: {
-                "A_inv": st.A_inv.tolist(),
-                "b": st.b.tolist(),
-            }
-            for arm, st in self._arms.items()
+            "version": STATE_VERSION,
+            "d": self.d,
+            "arms": {
+                arm: {
+                    "A_inv": st.A_inv.tolist(),
+                    "b": st.b.tolist(),
+                }
+                for arm, st in self._arms.items()
+            },
         }
-        self.state_path.write_text(json.dumps(payload))
+        # Save to file if configured
+        if self.state_path:
+            self.state_path.write_text(json.dumps(payload))
+        # Also save to Redis if enabled
+        router_state_save(self.d, payload)
 
     def _load(self) -> None:
         assert self.state_path is not None
         data = json.loads(self.state_path.read_text())
-        for arm, st in data.items():
-            A_inv = np.asarray(st["A_inv"], dtype=np.float64)
-            b = np.asarray(st["b"], dtype=np.float64)
+        self._load_from_payload(data)
+
+    def _load_from_payload(self, data: dict) -> None:
+        # Backward compatibility for old format
+        if isinstance(data, dict) and "arms" not in data:
+            for arm, st in data.items():
+                A_inv = np.asarray(st.get("A_inv", []), dtype=np.float64)
+                b = np.asarray(st.get("b", []), dtype=np.float64)
+                if A_inv.size == 0 or b.size == 0:
+                    continue
+                self._arms[arm] = _ArmState(A_inv=A_inv, b=b)
+            return
+        # New format with version and dimension; reset on mismatch
+        d_loaded = int(data.get("d", self.d))
+        if d_loaded != self.d:
+            self._arms = {}
+            return
+        arms = data.get("arms", {})
+        for arm, st in arms.items():
+            A_inv = np.asarray(st.get("A_inv", []), dtype=np.float64)
+            b = np.asarray(st.get("b", []), dtype=np.float64)
+            if A_inv.size == 0 or b.size == 0:
+                continue
             self._arms[arm] = _ArmState(A_inv=A_inv, b=b)

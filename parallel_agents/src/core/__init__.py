@@ -16,7 +16,7 @@ from .instructions import (
 
 __all__ = [
     "JudgeScores",
-    "JudgeVerdict", 
+    "JudgeVerdict",
     "PreviewOutcome",
     "Strategy",
     "StreamEventType",

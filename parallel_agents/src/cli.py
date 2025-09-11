@@ -10,7 +10,7 @@ import os
 from datetime import datetime
 import weave
 import wandb
-from agents import set_trace_processors
+from agents import add_trace_processor
 from weave.integrations.openai_agents.openai_agents import WeaveTracingProcessor
 
 from .race.race import race_with_judge_and_stream
@@ -61,42 +61,78 @@ def main(argv: list[str] | None = None) -> int:
         "--bandit-alpha",
         dest="bandit_alpha",
         type=float,
-        default=1.5,
+        default=float(os.getenv("BANDIT_ALPHA", "1.5")),
         help="LinUCB alpha (exploration strength)",
     )
     parser.add_argument(
         "--bandit-ridge",
         dest="bandit_ridge",
         type=float,
-        default=1e-2,
+        default=float(os.getenv("BANDIT_RIDGE", "1e-2")),
         help="LinUCB ridge regularization lambda",
     )
     parser.add_argument(
         "--bandit-state",
         dest="bandit_state",
-        default=".router_state.json",
-        help="Path to persist router state (JSON)",
+        default=os.getenv("BANDIT_STATE", ".router_state.json"),
+        help="Path to persist router state (JSON). If REDIS_URL is set, Redis is also used.",
     )
     parser.add_argument(
         "--bandit-length-threshold",
         dest="bandit_length_threshold",
         type=int,
-        default=2000,
+        default=int(os.getenv("BANDIT_LENGTH_THRESHOLD", "2000")),
         help="Length threshold for feature normalization",
     )
     parser.add_argument(
         "--bandit-quality-weight",
         dest="bandit_quality_weight",
         type=float,
-        default=0.8,
+        default=float(os.getenv("BANDIT_QUALITY_WEIGHT", "0.8")),
         help="Weight for judge quality in reward (0.0-1.0)",
     )
     parser.add_argument(
         "--bandit-speed-weight",
         dest="bandit_speed_weight",
         type=float,
-        default=0.2,
+        default=float(os.getenv("BANDIT_SPEED_WEIGHT", "0.2")),
         help="Weight for speed proxy in reward (0.0-1.0)",
+    )
+    parser.add_argument(
+        "--bandit-fallback-penalty",
+        dest="bandit_fallback_penalty",
+        type=float,
+        default=float(os.getenv("BANDIT_FALLBACK_PENALTY", "0.05")),
+        help="Penalty subtracted from reward when full run failed for a candidate (0.0-1.0)",
+    )
+    # Production tuning parameters
+    parser.add_argument(
+        "--adaptive-min-scale",
+        dest="adaptive_min_scale",
+        type=float,
+        default=float(os.getenv("ADAPTIVE_MIN_SCALE", "0.75")),
+        help="Lower multiplier bound for adaptive preview tokens",
+    )
+    parser.add_argument(
+        "--adaptive-max-scale",
+        dest="adaptive_max_scale",
+        type=float,
+        default=float(os.getenv("ADAPTIVE_MAX_SCALE", "1.50")),
+        help="Upper multiplier bound for adaptive preview tokens",
+    )
+    parser.add_argument(
+        "--latency-bias-scale",
+        dest="latency_bias_scale",
+        type=float,
+        default=float(os.getenv("LATENCY_BIAS_SCALE", "0.05")),
+        help="Magnitude of negative bias added to slower arms during selection",
+    )
+    parser.add_argument(
+        "--speculative-min-query-length",
+        dest="speculative_min_query_length",
+        type=int,
+        default=int(os.getenv("SPECULATIVE_MIN_QUERY_LENGTH", "2000")),
+        help="Query length threshold to enable speculative top-2 full stage",
     )
     parser.add_argument(
         "--no-web-search",
@@ -112,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
 
     project = os.getenv("WEAVE_PROJECT", "parallel-agents")
     weave.init(project)
-    set_trace_processors([WeaveTracingProcessor()])
+    add_trace_processor(WeaveTracingProcessor())
     wandb.init(project=os.getenv("WANDB_PROJECT", project), reinit=True)
 
     agent_models = _parse_models(args.agent_models)
@@ -128,6 +164,11 @@ def main(argv: list[str] | None = None) -> int:
         "bandit_state_path": args.bandit_state,
         "length_threshold": args.bandit_length_threshold,
         "reward_weights": (args.bandit_quality_weight, args.bandit_speed_weight),
+        "fallback_penalty": args.bandit_fallback_penalty,
+        "adaptive_min_scale": args.adaptive_min_scale,
+        "adaptive_max_scale": args.adaptive_max_scale,
+        "latency_bias_scale": args.latency_bias_scale,
+        "speculative_min_query_length": args.speculative_min_query_length,
     }
     if args.min_preview_tokens is not None:
         race_kwargs["min_preview_tokens"] = args.min_preview_tokens
