@@ -1,6 +1,130 @@
-## Parallel AI Research System — Architecture
+## Parallel AI Research System
 
-A competitive multi-agent system that races multiple frontier models (e.g., gpt-5, o4-mini-deep-research, gpt-4o) in parallel to deliver faster, more reliable research results.
+A competitive multi-agent system that races multiple frontier models in parallel, using intelligent bandit routing to optimize for quality, latency, and cost.
+
+## Why Bandit Routing?
+
+Traditional static routing wastes resources by treating all models equally. Our LinUCB bandit system learns which models perform best for different query types, automatically optimizing the exploration-exploitation tradeoff to minimize regret while maximizing research quality.
+
+**Key Benefits**:
+- **Adaptive Performance**: Learns from historical outcomes to improve future routing decisions
+- **Multi-Objective Optimization**: Balances quality, latency, and cost simultaneously  
+- **Uncertainty Quantification**: Uses confidence bounds to explore promising but uncertain options
+- **Production Ready**: Handles concept drift, state persistence, and graceful degradation
+
+## System Architecture
+
+```mermaid
+flowchart TB
+    subgraph "Intelligence Layer"
+        ROUTER[LinUCB Router<br/>Multi-Armed Bandit]
+        REWARD[Reward Policy<br/>Quality + Latency + Cost]
+        METRICS[Metrics Collector<br/>P95 Latency Tracking]
+    end
+    
+    subgraph "Execution Layer"
+        RACE[Race Controller]
+        JUDGE[Judge System<br/>Multi-Dimensional Scoring]
+        AGENTS[Agent Factory<br/>Model Orchestration]
+    end
+    
+    subgraph "Infrastructure"
+        CACHE[Redis Cache<br/>Preview Optimization]
+        STATE[Persistent State<br/>Bandit Learning]
+        STREAM[Streaming Engine<br/>Real-time Responses]
+    end
+    
+    ROUTER --> AGENTS
+    AGENTS --> RACE
+    RACE --> JUDGE
+    JUDGE --> REWARD
+    REWARD --> ROUTER
+    METRICS --> ROUTER
+    RACE --> METRICS
+    
+    AGENTS --> STREAM
+    RACE --> CACHE
+    ROUTER --> STATE
+```
+
+## Bandit Routing Flow
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Router as LinUCB Router
+    participant Models as Model Pool
+    participant Judge as Judge System
+    participant Reward as Reward Policy
+    
+    User->>Router: Query + Context Features
+    Router->>Router: Compute UCB Scores<br/>(Mean + α×Uncertainty)
+    Router->>Models: Select Top-K Models<br/>with Latency Bias
+    
+    par Parallel Preview Generation
+        Models->>Models: Generate Previews
+        Models->>Models: Record Latency Metrics
+    end
+    
+    Models->>Judge: Submit Previews
+    Judge->>Judge: Multi-Dimensional Scoring<br/>(Relevance, Coverage, Faithfulness)
+    Judge->>Reward: Judge Scores + Latency + Cost
+    Reward->>Reward: Compute Blended Rewards<br/>(Quality×0.8 + Speed×0.2)
+    Reward->>Router: Update Model Beliefs<br/>(Sherman-Morrison)
+    
+    Router->>User: Optimized Model Selection<br/>for Future Queries
+```
+
+## Decision Process
+
+```mermaid
+flowchart TD
+    START([New Query]) --> EXTRACT[Extract Features<br/>Length, Embeddings, Intent]
+    EXTRACT --> UCB["Compute UCB Scores<br/>Mean + α×√(Uncertainty)"]
+    UCB --> BIAS[Apply Latency Bias<br/>Penalize Slow Models]
+    BIAS --> SELECT[Select Top Models<br/>Ranked by Score]
+    
+    SELECT --> PREVIEW[Generate Previews<br/>Parallel Execution]
+    PREVIEW --> CACHE{Cache Hit?}
+    CACHE -->|Yes| CACHED[Use Cached Result]
+    CACHE -->|No| GENERATE[Stream New Preview]
+    
+    CACHED --> JUDGE[Judge Evaluation]
+    GENERATE --> JUDGE
+    JUDGE --> REWARD[Compute Rewards<br/>Quality + Latency + Cost]
+    REWARD --> UPDATE[Update Router State<br/>Learn from Outcome]
+    UPDATE --> END([Improved Routing])
+```
+
+## Algorithm Details
+
+### LinUCB Multi-Armed Bandit
+
+**Mathematical Foundation**:
+- **Linear Reward Model**: $\mathbb{E}[r|x,a] = \theta_a^\top x$ per arm $a$
+- **UCB Score**: $\mathrm{UCB}(x) = \hat{\theta}^\top x + \alpha \sqrt{x^\top A^{-1} x}$
+- **Sherman-Morrison Update**: $(A + xx^\top)^{-1} = A^{-1} - \frac{A^{-1}xx^\top A^{-1}}{1 + x^\top A^{-1}x}$
+
+**Why LinUCB Works**:
+- **Exploration-Exploitation Balance**: High uncertainty arms get selected for exploration
+- **Contextual Learning**: Different query types learn different optimal models
+- **Sublinear Regret**: Cumulative regret grows as $O(\sqrt{T \log T})$ with proper tuning
+
+### Multi-Dimensional Reward Policy
+
+**Reward Composition**: $R = w_q \cdot Q + w_l \cdot L + w_c \cdot C$ where:
+- **Quality (Q)**: Judge overall scores [0,1] measuring relevance, coverage, faithfulness
+- **Latency (L)**: $1 - \text{latency\_norm}$ with P95-based normalization and query-length scaling
+- **Cost (C)**: $1 - \text{cost\_norm}$ using token proxy or USD price tables
+
+**Default Weights**: $w_q=0.8, w_l=0.2, w_c=0.0$ (configurable via CLI)
+
+### Performance Optimizations
+
+- **Adaptive Preview Scaling**: Token limits scale 75%-150% by query complexity
+- **Speculative Execution**: Top-2 parallel execution for queries >2000 chars
+- **Latency Bias**: P95-based negative bias applied during model selection
+- **State Persistence**: Dual Redis + file persistence with version management
 
 ### Quickstart (Setup + Run)
 
@@ -104,319 +228,32 @@ When `REDIS_URL` is set, the orchestrator will:
 
 Implementation: see `src/services/cache_redis.py` and usage in `src/race/race.py`.
 
-### System Architecture
+## Why Bandit Routing Works
 
-```mermaid
-flowchart LR
-  %% Inputs/Config
-  subgraph INPUTS["Inputs & Config (env + CLI)"]
-    U["User Query"]
-    CFG["agent_models, judge_model, min_preview_tokens, strategy\nalpha, ridge, weights, adaptive scales, latency bias, speculative threshold"]
-  end
+**Core Problem**: Judge determines quality after seeing all previews, but we must choose which model to run first for the full answer. Without learning, this choice is arbitrary.
 
-  %% Orchestrator
-  subgraph ORCH["Orchestrator (race.py)"]
-    OR["Coordinate flow"]
-  end
+**Bandit Solution**: Learn the mapping from query context → "which model tends to win judging and succeed" to reduce retries and tail latency.
 
-  %% Candidate workers (fan-out/fan-in)
-  subgraph CANDS["Candidate Agents (Parallel × N)"]
-    PREV["Fan-out: Previews until threshold T_adaptive"]
-    GATH["Fan-in: Gather all previews"]
-  end
+**Measurable Benefits**:
+- **First-try success rate ↑**: UCB policy increases probability that first attempt matches judge preference
+- **Retries per run ↓**: Fewer fallbacks reduce E2E p95/p99 latency  
+- **Cost ↓**: Reduced retry tokens and bounded exploration via α/λ parameters
+- **Drift resilience**: Online updates adapt to provider quality/latency changes
 
-  %% Judge
-  subgraph JUDGE["Judge"]
-    JPRE["Judge & Rank"]
-  end
+**When Bandit Helps Most**: Model performance varies by query characteristics (length/intent/risk) and provider health drifts over time.
 
-  %% Full-answer with fallback + speculative
-  subgraph FULL["Answer Generation"]
-    ORDER["Order by score (winner first)"]
-    SPEC["Speculative top-2 (for long queries)"]
-    TRY{"Winner first; on error try next"}
-    STREAM["Final Answer (streaming)"]
-  end
-
-  %% Routing and State
-  subgraph ROUTE["Routers"]
-    BASE["BaselineRouter"]
-    LNUCB["LinUCBRouter (with latency bias)"]
-  end
-
-  subgraph STATE["State & Metrics"]
-    SREDIS["Router State (Redis JSON)"]
-    SFILE["Router State (File JSON)"]
-    METR["Preview Latency Metrics (p95)"]
-    PCACHE["Preview Cache (Redis)"]
-  end
-
-  %% External services
-  subgraph EXT["External Services"]
-    LLM["LLM APIs"]
-    WS["Web Search Tools"]
-  end
-
-  %% Flow
-  U --> OR
-  CFG --> OR
-  OR -->|baseline| PREV
-  OR -->|bandit| ROUTE
-  ROUTE --> PREV
-  PREV --> GATH
-  GATH --> JPRE
-  JPRE --> ORDER
-  ORDER --> SPEC
-  SPEC --> STREAM
-  ORDER --> TRY
-  TRY -->|success| STREAM
-  TRY -->|failure| TRY
-  STREAM --> U
-
-  %% Caches & metrics
-  PREV -.-> PCACHE
-  PREV -.-> LLM
-  PREV -.-> WS
-  STREAM -.-> LLM
-  STREAM -.-> WS
-  PREV -.-> METR
-  METR -.-> ROUTE
-
-  %% State persistence
-  ROUTE <--> SREDIS
-  ROUTE <--> SFILE
-```
-
-### Interfaces & Components (Tier 0)
-
-```mermaid
-flowchart LR
-  subgraph IFACE[Interfaces]
-    RIF[Router]
-    FIF[FeatureExtractor]
-    RPIF[RewardPolicy]
-    SSTORE[StateStore]
-    PCACHE[PreviewCache]
-  end
-
-  subgraph IMPL[Implementations]
-    BASE[BaselineRouter]
-    LNUCB[LinUCBRouter]
-    LENF[LengthFeatures]
-    EMBF[EmbeddingFeatures]
-    SREDIS[Redis State]
-    SFILE[File State]
-    RCACHE[Redis Preview Cache]
-  end
-
-  RIF --> BASE
-  RIF --> LNUCB
-  FIF --> LENF
-  FIF --> EMBF
-  SSTORE --> SREDIS
-  SSTORE --> SFILE
-  PCACHE --> RCACHE
-```
-
-### End-to-End Sequence (with Bandit + Judge)
-
-```mermaid
-sequenceDiagram
-  participant U as User
-  participant OR as Orchestrator
-  participant RT as Router
-  participant AG as Agents (N)
-  participant JD as Judge
-  participant ST as StateStore (Redis/File)
-  participant MC as Metrics (Latency)
-
-  U->>OR: Query
-  OR->>RT: select(context features)
-  RT->>ST: load(state)
-  RT-->>OR: ordered models
-  par Previews
-    OR->>AG: stream preview (T_adaptive)
-    AG-->>OR: preview text
-    OR->>MC: record latency
-  end
-  OR->>JD: judge(previews)
-  JD-->>OR: scores & winner
-  alt long query
-    OR->>AG: speculative top-2 full
-    AG-->>OR: first completed full
-  else
-    OR->>AG: full for winner else fallback
-    AG-->>OR: full
-  end
-  OR->>RT: bulk_update(reward)
-  RT->>ST: save(state)
-  OR-->>U: final answer
-```
-
-### State & Metrics
-
-```mermaid
-flowchart TD
-  subgraph ROUTE[Routing]
-    X[Context features x]
-    POL[LinUCB Policy]
-    DEC[Decay]
-  end
-  subgraph STORE[Persistence]
-    R[Redis: router_state]
-    F[File: .router_state.json]
-  end
-  subgraph MET[Metrics]
-    L95[p95 preview latency per model]
-  end
-
-  X --> POL --> DEC --> R
-  POL --> F
-  L95 --> POL
-```
-
-### Configuration (env + CLI)
-
-- Core env: `OPENAI_API_KEY`, `REDIS_URL`, `ROUTER_STATE_KEY`
-- Bandit env defaults: `BANDIT_ALPHA`, `BANDIT_RIDGE`, `BANDIT_STATE`, `BANDIT_LENGTH_THRESHOLD`, `BANDIT_QUALITY_WEIGHT`, `BANDIT_SPEED_WEIGHT`, `BANDIT_FALLBACK_PENALTY`, `LATENCY_BIAS_SCALE`, `ADAPTIVE_MIN_SCALE`, `ADAPTIVE_MAX_SCALE`, `SPECULATIVE_MIN_QUERY_LENGTH`
-- Preview cache: `PREVIEW_CACHE_TTL`
-
-### Why bandit routing (with a judge already in place)
-
-- **Roles are different**:
-  - **Judge on previews**: scores all candidates’ previews and determines the best content plan (quality selection). This protects final answer quality regardless of order.
-  - **Bandit router**: chooses the order to attempt full generations so we hit the likely winner first (efficiency selection). This cuts retries and tail latency.
-
-- **What bandit guarantees (intuitively)**:
-  - Compared to any fixed order, LinUCB’s UCB policy increases the probability that the first attempted model is the same one the judge would ultimately prefer for similar queries (higher first-try success).
-  - With continued traffic, uncertainty shrinks and the policy converges to context-specific best ordering; cumulative regret grows sublinearly. In practice this means fewer fallbacks over time.
-  - Final quality is not degraded: if the first attempt fails or underperforms, the fallback cascade still tries the next best according to the judge.
-
-- **Why it’s needed even with judging**:
-  - The judge only tells us which candidate is best after seeing all previews. We still must choose which model to run first for the full answer. Without bandit learning, that choice is arbitrary or static.
-  - Learning the mapping from simple context features (e.g., length) to “which model tends to win judging and succeed” reduces expected retries, lowering E2E p95/p99 and cost.
-
-- **Measurable effects (what to track)**:
-  - First-try success rate ↑; retries per run ↓; E2E p95/p99 ↓; tokens per run ↓; $/resolved ↓.
-  - Exploration rate ↓ over time as state accumulates; traffic adapts to provider drift.
-
-Details and instrumentation:
-- **LinUCB scoring (supports "better first choice")**
-  - Posterior per arm: $\hat{\theta} = A^{-1} b$, with $A = \lambda I + \sum x x^\top$, $b = \sum r x$.
-  - Upper Confidence Bound:
-    
-  $$\mathrm{UCB}(x) = \hat{\theta}^\top x + \alpha \, \sqrt{x^\top A^{-1} x}$$
-    
-  - Ordering by UCB increases $\Pr(\text{first pick} = \text{oracle-best})$. In offline sim, routing accuracy $\approx 1.0$ vs $0.5$ chance.
-  - Instrument: log context features $x$, chosen arm, mean $= \hat{\theta}^\top x$, uncertainty $= \sqrt{x^\top A^{-1} x}$, and first-try success.
-- **Lower tail latency via fewer fallbacks**
-  - Let $T_{\mathrm{E2E}} = T_{\mathrm{previews}} + T_{\mathrm{judge}} + T_{\mathrm{full}}$. With fallbacks:
-
-  $$\mathbb{E}[T_{\mathrm{E2E}}] \approx T_{\mathrm{previews}} + T_{\mathrm{judge}} + \sum_{i=1}^{K} p_i \cdot T^{(i)}_{\mathrm{retry}} + T^{(\star)}_{\mathrm{full}}$$
-
-  - Higher first-try success lowers $\sum_i p_i$, shrinking mean and p95/p99 (per Tail at Scale).
-  - Instrument: fallbacks per run, E2E p50/p95/p99, and retry time.
-- **Lower cost via reduced retries + bounded exploration**
-  - Expected tokens:
-    
-  $$\mathbb{E}[C] = C_{\mathrm{previews}} + C_{\mathrm{full}} + \sum_i p_i \cdot C^{(i)}_{\mathrm{retry}}$$
-    
-  - Higher first-try success decreases $\sum_i p_i \cdot C^{(i)}_{\mathrm{retry}}$. $\alpha$ and $\lambda$ bound exploration; as data grows, $A^{-1}$ shrinks, reducing uncertainty.
-  - Persistence of $(A^{-1}, b)$ across runs compounds learning and reduces cold-start waste.
-  - Instrument: tokens per phase, retries’ token cost, and $/resolved by strategy (baseline vs bandit).
-- **Drift resilience**
-  - Online updates adjust $\hat{\theta}$ as provider quality/latency changes; add decay (scale $A^{-1}$, $b$) or a sliding window for faster adaptation.
-  - Include health in features $x$: recent success rate, p95 latency, error budget burn, guardrail risk.
-  - Instrument: regret vs oracle (offline), routing share over time, correlation with provider health.
-
-> When bandit helps most: model quality/latency varies materially by query characteristics (length/intent/risk), and provider health drifts over time. When it won’t: homogeneous models with identical performance across contexts — in that case bandit converges to baseline routing with minimal overhead.
-
-### What are bandits?
-- **Multi-armed bandits (MAB)**: sequential decisions balancing exploration vs exploitation. At round $t$, pick arm $a_t$, observe reward $r_t \in [0,1]$, aim to minimize cumulative regret:
-  
-  $$ R_T = \sum_{t=1}^{T} \big(\mu^* - \mu_{a_t}\big) $$
-  
-  where $\mu^*$ is the best arm’s expected reward.
-- **Contextual bandits**: each round comes with features $x_t$. Arm rewards depend on context: $\mu_a(x_t)$. The goal is to learn a routing policy $\pi(x)$ that picks the best arm for each context.
-- **LinUCB**:
-  - Assumption: linear reward model per arm: $\mathbb{E}[r|x,a] = \theta_a^\top x$.
-  - Maintain per-arm $A^{-1}$ (inverse covariance) and $b$ (response). Estimate $\hat{\theta}_a = A^{-1} b$.
-  - Score arms by UCB (above). Pick argmax, observe reward, update:
-    - $A^{-1} \leftarrow$ Sherman–Morrison update with $x x^\top$
-    - $b \leftarrow b + r\,x$
-  - Intuition: pick arms with high predicted reward or high uncertainty; uncertainty shrinks as evidence accumulates.
-
-#### Configuration knobs (make the trade-offs explicit)
-- **--strategy**: `baseline | bandit`
-- **--bandit-alpha**: exploration strength $\alpha$ (higher = more exploration)
-- **--bandit-ridge**: regularization $\lambda$ (stability; larger reduces variance)
-- **--bandit-state**: JSON path to persist $(A^{-1}, b)$ across runs
-- **--bandit-length-threshold**: normalizer for length feature (default 2000); set to your median query chars or compute tokens
-- **--bandit-quality-weight --bandit-speed-weight**: reward weights; must sum to $\le 1$ for clipping to [0,1]
-
-#### Validation checklist (baseline vs bandit)
-1. Define a prompt set (≥100) across intents/lengths; run both strategies.
-2. Log: first-try success, fallbacks, E2E p50/p95/p99, tokens per phase, $/resolved.
-3. Compare: bandit should improve first-try success and reduce fallbacks, lowering p95/p99 and cost.
-4. Sanity: ensure exploration rate decreases over time; investigate anomalies in provider health.
-
-References: “The Tail at Scale” (Dean & Barroso, 2013); contextual bandits/LinUCB tutorials (e.g., Russo et al.).
-
-#### Observed metrics (local simulation and live run)
-
-| Scenario | Routing Accuracy vs Oracle | Winner Fallbacks | Notes |
-| --- | ---:| ---:| --- |
-| Offline sim (smoke_bandit) | ~1.00 | n/a | Distinct arms by feature; materially > 0.5 chance |
-| Live quick trial (France capital) | Judge winner on first try | 0 | Both models passed preview; judge picked the higher overall |
+**When Bandit Won't Help**: Homogeneous models with identical performance across contexts (converges to baseline with minimal overhead).
 
 
-> Tip: Track p95 E2E latency, retries per run, and $/resolved request with and without `--strategy bandit`. Persist state via `--bandit-state` to accumulate learning.
+## Configuration
 
+**Core Environment Variables**:
+- `OPENAI_API_KEY`, `REDIS_URL`, `ROUTER_STATE_KEY`
+- `BANDIT_ALPHA`, `BANDIT_RIDGE`, `BANDIT_QUALITY_WEIGHT`, `BANDIT_SPEED_WEIGHT`
+- `PREVIEW_CACHE_TTL`, `MODEL_PRICE_USD_PER_TOKEN_JSON`
 
-### Key Design Decisions
-
-- Parallel Racing: Multiple LLMs compete simultaneously to reduce latency
-- Quality-Based Selection: LLM-as-a-judge evaluates all previews and selects the best approach
-- Fault Tolerance: Automatic fallback cascade when preferred models fail
-- Real-time Streaming: Token-by-token delivery for responsive user experience
-- Cost Optimization: Preview phase uses minimal tokens; only winner generates full response
-
-### Integration & Usage
-
-- Run with uv (project root is this folder):
-```bash
-uv run python -m src.cli "Generate a comprehensive, provider-ready UTI assessment and plan for Sarah Smith, a 28-year-old non-pregnant female in region CA-ON with normal renal function. Presenting symptoms: dysuria and urgency. Denies: frequency, suprapubic pain, hematuria. No red flags: fever, rigors, flank pain, nausea/vomiting, systemic illness. History: no antibiotics in last 90 days; no allergies; no current meds; no ACEI/ARB use; no indwelling catheter; no urinary stones; not immunocompromised. Recurrence markers: none (no relapse within 4 weeks; not recurrent at 6 or 12 months).
-
-Return a single markdown document with these sections:
-- Executive Summary
-- Deterministic Assessment (algorithm decision, rationale)
-- Treatment Recommendation (regimen, dose, frequency, duration; acceptable alternatives; contraindications)
-- Safety Validation (DDIs, renal/pregnancy considerations; approval/modify/reject with rationale; monitoring)
-- Clinical Reasoning Narrative (differential diagnosis and confidence score)
-- Prescribing Considerations tailored to CA-ON (include regional resistance context)
-- Research Summary with citations (concise, credible sources)
-- 72-Hour Follow-Up Plan (monitoring checklist, special instructions)
-- Diagnosis Brief (provider-ready narrative)
-
-Use current evidence-based guidelines, tailor recommendations to patient factors and regional resistance, and keep each section concise and actionable." \
-  --judge-model gpt-4o \
-  --agent-models "o4-mini-deep-research-2025-06-26,gpt-4o,gpt-4o-mini,gpt-5,gpt-4.1" \
-  --min-preview-tokens 200 \
-  --strategy bandit \
-  --bandit-alpha 1.5 \
-  --bandit-ridge 1e-2 \
-  --bandit-state .router_state.json \
-  --bandit-length-threshold 2000 \
-  --bandit-quality-weight 0.8 \
-  --bandit-speed-weight 0.2
-```
-
-#### Why bandit routing?
-- Prioritizes high-value models first, reducing retries and tail latency.
-- Learns per-intent and length which model wins judged comparisons, lowering cost.
-- Adapts to provider drift and incidents by shifting traffic, while preserving exploration.
-
-#### Implementation notes
-- LinUCB with Sherman–Morrison updates and JSON persistence in `src/routing/routing_linucb.py`.
-- Unified orchestrator: `src/race/race.py` with `--strategy baseline|bandit` switch.
-- CLI flag `--strategy baseline|bandit` to switch without code changes.
+**Key CLI Flags**:
+- `--strategy {baseline,bandit}`: Switch routing strategies
+- `--bandit-alpha`: Exploration strength (higher = more exploration)
+- `--bandit-ridge`: Regularization for stability
+- `--bandit-quality-weight --bandit-speed-weight`: Reward composition weights

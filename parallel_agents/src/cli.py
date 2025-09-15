@@ -99,6 +99,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Weight for speed proxy in reward (0.0-1.0)",
     )
     parser.add_argument(
+        "--bandit-cost-weight",
+        dest="bandit_cost_weight",
+        type=float,
+        default=float(os.getenv("BANDIT_COST_WEIGHT", "0.0")),
+        help="Weight for cost term in reward (0.0-1.0)",
+    )
+    parser.add_argument(
         "--bandit-fallback-penalty",
         dest="bandit_fallback_penalty",
         type=float,
@@ -135,6 +142,20 @@ def main(argv: list[str] | None = None) -> int:
         help="Query length threshold to enable speculative top-2 full stage",
     )
     parser.add_argument(
+        "--preview-timeout-s",
+        dest="preview_timeout_s",
+        type=float,
+        default=float(os.getenv("PREVIEW_TIMEOUT_S", "0")),
+        help="Per-preview timeout seconds (0 means disabled)",
+    )
+    parser.add_argument(
+        "--full-timeout-s",
+        dest="full_timeout_s",
+        type=float,
+        default=float(os.getenv("FULL_TIMEOUT_S", "0")),
+        help="Full-answer timeout seconds (0 means disabled)",
+    )
+    parser.add_argument(
         "--no-web-search",
         dest="no_web_search",
         action="store_true",
@@ -164,11 +185,14 @@ def main(argv: list[str] | None = None) -> int:
         "bandit_state_path": args.bandit_state,
         "length_threshold": args.bandit_length_threshold,
         "reward_weights": (args.bandit_quality_weight, args.bandit_speed_weight),
+        "bandit_cost_weight": args.bandit_cost_weight,
         "fallback_penalty": args.bandit_fallback_penalty,
         "adaptive_min_scale": args.adaptive_min_scale,
         "adaptive_max_scale": args.adaptive_max_scale,
         "latency_bias_scale": args.latency_bias_scale,
         "speculative_min_query_length": args.speculative_min_query_length,
+        "preview_timeout_s": (args.preview_timeout_s or None),
+        "full_timeout_s": (args.full_timeout_s or None),
     }
     if args.min_preview_tokens is not None:
         race_kwargs["min_preview_tokens"] = args.min_preview_tokens

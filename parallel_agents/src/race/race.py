@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import logging
 from pathlib import Path
 from collections.abc import Callable
@@ -24,13 +26,14 @@ from ..runtime.metrics import (
 )
 from ..routing.routing_linucb import LinUCBRouter
 from ..core.types import PreviewOutcome, Strategy
+from ..core.types import RewardPolicy as RewardPolicyProtocol, FeatureExtractor as FeatureExtractorProtocol
+from ..runtime.reward import QualityLatencyCostPolicy, QualityLatencyCostWeights
 from ..utils.citations import (
     extract_citations_from_text,
     merge_and_dedupe,
     clean_citations_for_export,
 )
 from ..services.cache_redis import (
-    redis_cache_enabled,
     make_preview_key,
     preview_cache_get,
     preview_cache_set,
@@ -120,44 +123,6 @@ def _select_models_for_strategy(
     return selected_models, router, feats
 
 
-def _update_bandit_rewards(
-    router: LinUCBRouter | None,
-    feats: list[float] | None,
-    verdict,
-    previews_outcomes: list[PreviewOutcome],
-    selected_models: list[str],
-    min_preview_tokens: int,
-    reward_weights: tuple[float, float],
-    *,
-    failed_full_indices: list[int] | None = None,
-    fallback_penalty: float = 0.05,
-    query: str = "",
-    length_threshold: int = 2000,
-):
-    if router is None or feats is None:
-        return
-    wq, ws = reward_weights
-    rewards_by_model: dict[str, float] = {}
-    for i, m in enumerate(selected_models):
-        overall = 0.0
-        for s in verdict.scores:
-            if s.index == i:
-                overall = float(s.overall)
-                break
-        # Prefer latency-aware normalization if we have recent p95; otherwise fallback to token proxy
-        p95 = get_preview_latency_p95(selected_models[i])
-        if p95 is not None and p95 > 0:
-            lat_norm = compute_latency_norm(query, p95, length_threshold)
-            speed_term = 1.0 - lat_norm
-        else:
-            speed_term = min(
-                1.0, max(0.0, previews_outcomes[i].tokens / float(min_preview_tokens))
-            )
-        reward = max(0.0, min(1.0, wq * overall + ws * speed_term))
-        if failed_full_indices and i in failed_full_indices:
-            reward = max(0.0, reward - max(0.0, float(fallback_penalty)))
-        rewards_by_model[m] = reward
-    router.bulk_update(feats, rewards_by_model)
 
 
 def _collect_citations(previews_text: list[str], full_response_text: str) -> list[dict]:
@@ -181,14 +146,20 @@ async def race_with_judge_and_stream(
     bandit_alpha: float = 1.5,
     bandit_ridge_lambda: float = 1e-2,
     bandit_state_path: str | None = ".router_state.json",
-    feature_extractor: Callable[..., list[float]] | None = None,
+    feature_extractor: Callable[..., list[float]] | FeatureExtractorProtocol | None = None,
     reward_weights: tuple[float, float] = (0.8, 0.2),
+    bandit_cost_weight: float = 0.0,
     length_threshold: int = 2000,
     fallback_penalty: float = 0.05,
     adaptive_min_scale: float = 0.75,
     adaptive_max_scale: float = 1.50,
     latency_bias_scale: float = 0.05,
     speculative_min_query_length: int = 2000,
+    preview_timeout_s: float | None = None,
+    full_timeout_s: float | None = None,
+    max_total_preview_tokens: int | None = None,
+    max_total_full_tokens: int | None = None,
+    max_total_cost_usd: float | None = None,
 ) -> tuple[int, str, dict[str, object]]:
     # Start a higher-level trace to group all nested agent runs under one workflow trace
     _trace = agents_trace("Parallel Deep Research Workflow")
@@ -206,7 +177,11 @@ async def race_with_judge_and_stream(
     strategy_value = _resolve_strategy(strategy)
     global _LATENCY_BIAS_SCALE
     _LATENCY_BIAS_SCALE = max(0.0, float(latency_bias_scale))
-    feature_fn = feature_extractor or _default_features
+    # Support either callable or FeatureExtractor Protocol objects
+    if feature_extractor and hasattr(feature_extractor, "compute"):
+        feature_fn = lambda q, length_threshold: feature_extractor.compute(q)  # type: ignore[assignment]
+    else:
+        feature_fn = feature_extractor or _default_features
     selected_models, router, feats = _select_models_for_strategy(
         query,
         list(agent_models),
@@ -252,7 +227,7 @@ async def race_with_judge_and_stream(
 
     async def _timed_preview(agent_obj, q, stop_tokens, phase_name):
         t0 = time.perf_counter()
-        tokens, text = await stream_response(
+        coro = stream_response(
             agent_obj,
             q,
             stop_after_tokens=stop_tokens,
@@ -260,38 +235,27 @@ async def race_with_judge_and_stream(
             log_every_tokens=20,
             phase=phase_name,
         )
+        if preview_timeout_s and preview_timeout_s > 0:
+            tokens, text = await asyncio.wait_for(coro, timeout=preview_timeout_s)
+        else:
+            tokens, text = await coro
         elapsed = time.perf_counter() - t0
         return tokens, text, elapsed
 
-    if redis_cache_enabled():
-        for i, agent in enumerate(agents):
-            key = make_preview_key(query, selected_models[i], adaptive_min_tokens)
-            cached = preview_cache_get(key)
-            if cached is not None:
-                # cached is (tokens, text)
-                previews_results.append((cached[0], cached[1], None))
-            else:
-                tokens, text, elapsed = await _timed_preview(
-                    agent,
-                    query,
-                    adaptive_min_tokens,
-                    f"preview:{agent.name}",
-                )
-                preview_cache_set(key, tokens, text)
-                previews_results.append((tokens, text, elapsed))
-    else:
-        preview_tasks = [
-            asyncio.create_task(
-                _timed_preview(
-                    agent,
-                    query,
-                    adaptive_min_tokens,
-                    f"preview:{agent.name}",
-                )
+    for i, agent in enumerate(agents):
+        key = make_preview_key(query, selected_models[i], adaptive_min_tokens)
+        cached = preview_cache_get(key)
+        if cached is not None:
+            previews_results.append((cached[0], cached[1], None))
+        else:
+            tokens, text, elapsed = await _timed_preview(
+                agent,
+                query,
+                adaptive_min_tokens,
+                f"preview:{agent.name}",
             )
-            for agent in agents
-        ]
-        previews_results = await asyncio.gather(*preview_tasks)
+            preview_cache_set(key, tokens, text)
+            previews_results.append((tokens, text, elapsed))
     previews_outcomes = [
         PreviewOutcome(
             name=agents[i].name,
@@ -342,7 +306,7 @@ async def race_with_judge_and_stream(
             f"Your own winning preview JSON:\n{sel_preview}\n\n"
             f"Continue with the full answer now."
         )
-        tokens_local, text_local = await stream_response(
+        coro = stream_response(
             full_agent_local,
             seed_local,
             stop_after_tokens=None,
@@ -350,6 +314,10 @@ async def race_with_judge_and_stream(
             log_every_tokens=50,
             phase="full_answer",
         )
+        if full_timeout_s and full_timeout_s > 0:
+            tokens_local, text_local = await asyncio.wait_for(coro, timeout=full_timeout_s)
+        else:
+            tokens_local, text_local = await coro
         return i, tokens_local, text_local, full_agent_local.name
 
     do_speculative = (len(query or "") >= speculative_min_query_length) and (
@@ -404,19 +372,30 @@ async def race_with_judge_and_stream(
         raise RuntimeError("All candidates failed to stream full answer")
 
     if strategy_value == Strategy.BANDIT:
-        _update_bandit_rewards(
-            router,
-            feats,
-            verdict,
-            previews_outcomes,
-            selected_models,
-            adaptive_min_tokens,
-            reward_weights,
-            failed_full_indices=failed_full_indices,
+        # New reward policy with quality/latency/cost blend
+        wq, ws = reward_weights
+        weights = QualityLatencyCostWeights(
+            quality_weight=float(wq),
+            latency_weight=float(ws),
+            cost_weight=float(bandit_cost_weight),
+        )
+        policy = QualityLatencyCostPolicy(
+            weights=weights,
             fallback_penalty=fallback_penalty,
-            query=query,
             length_threshold=length_threshold,
         )
+        judge_overall = [float(s.overall) for s in verdict.scores]
+        preview_tokens = [int(po.tokens) for po in previews_outcomes]
+        rewards_by_model = policy.compute_rewards(
+            query=query,
+            models=selected_models,
+            judge_overall=judge_overall,
+            preview_tokens=preview_tokens,
+            min_preview_tokens=adaptive_min_tokens,
+            failed_full_indices=set(failed_full_indices or []),
+        )
+        if router is not None and feats is not None:
+            router.bulk_update(feats, rewards_by_model)
 
     debug: dict[str, object] = {
         "previews": previews_text,
@@ -443,3 +422,4 @@ async def race_with_judge_and_stream(
     except Exception:
         pass
     return final_idx, final_agent_name or "", debug
+
