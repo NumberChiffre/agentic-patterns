@@ -28,15 +28,13 @@ class EmbeddingFeatures:
         model: str = "text-embedding-3-small",
         output_dim: int = 24,
         seed: int = 42,
+        src_dim: int = 1536
     ) -> None:
         self.model = model
         self.output_dim = max(8, int(output_dim))
         self.seed = int(seed)
-        # Fixed random projection for reproducibility
         random.seed(self.seed)
         np.random.seed(self.seed)
-        # Assume source dim 1536; create projection matrix (output_dim x 1536)
-        src_dim = 1536
         self.proj = np.random.normal(
             0, 1.0 / math.sqrt(src_dim), (self.output_dim, src_dim)
         )
@@ -76,4 +74,27 @@ def compute_intent_signals(query: str) -> List[float]:
     return [coding, reasoning, retrieval]
 
 
-__all__ = ["LengthFeatures", "EmbeddingFeatures", "compute_intent_signals"]
+def compute_context_features(
+    query: str,
+    *,
+    length_threshold: int = 2000,
+    use_embedding: bool = False,
+    embedding_model: str = "text-embedding-3-small",
+    embedding_output_dim: int = 24,
+) -> List[float]:
+    length_feats = LengthFeatures(length_threshold=length_threshold).compute(query)
+    if not use_embedding:
+        return length_feats
+    emb_feats = EmbeddingFeatures(
+        model=embedding_model,
+        output_dim=embedding_output_dim,
+    ).compute(query)
+    return length_feats + emb_feats
+
+
+__all__ = [
+    "LengthFeatures",
+    "EmbeddingFeatures",
+    "compute_intent_signals",
+    "compute_context_features",
+]

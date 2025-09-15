@@ -142,6 +142,13 @@ def main(argv: list[str] | None = None) -> int:
         help="Query length threshold to enable speculative top-2 full stage",
     )
     parser.add_argument(
+        "--speculative-top-k",
+        dest="speculative_top_k",
+        type=int,
+        default=int(os.getenv("SPECULATIVE_TOP_K", "2")),
+        help="Number of top candidates (by judge) to run speculatively in parallel",
+    )
+    parser.add_argument(
         "--preview-timeout-s",
         dest="preview_timeout_s",
         type=float,
@@ -160,6 +167,26 @@ def main(argv: list[str] | None = None) -> int:
         dest="no_web_search",
         action="store_true",
         help="Disable web search tool for candidates",
+    )
+    parser.add_argument(
+        "--bandit-features",
+        dest="bandit_features",
+        choices=["length", "embedding"],
+        default=os.getenv("BANDIT_FEATURES", "length"),
+        help="Feature set for bandit routing (length or embedding)",
+    )
+    parser.add_argument(
+        "--embedding-model",
+        dest="embedding_model",
+        default=os.getenv("EMBEDDING_MODEL", "text-embedding-3-small"),
+        help="Embedding model to use when bandit-features=embedding",
+    )
+    parser.add_argument(
+        "--embedding-dim",
+        dest="embedding_dim",
+        type=int,
+        default=int(os.getenv("EMBEDDING_DIM", "24")),
+        help="Output dimensions for random projection when using embeddings",
     )
     args = parser.parse_args(argv)
 
@@ -191,9 +218,11 @@ def main(argv: list[str] | None = None) -> int:
         "adaptive_max_scale": args.adaptive_max_scale,
         "latency_bias_scale": args.latency_bias_scale,
         "speculative_min_query_length": args.speculative_min_query_length,
+        "speculative_top_k": args.speculative_top_k,
         "preview_timeout_s": (args.preview_timeout_s or None),
         "full_timeout_s": (args.full_timeout_s or None),
     }
+    # Feature extractor selection passed via env variables; race.py reads BANDIT_FEATURES/EMBEDDING_*.
     if args.min_preview_tokens is not None:
         race_kwargs["min_preview_tokens"] = args.min_preview_tokens
 

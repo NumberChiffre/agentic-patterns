@@ -59,7 +59,7 @@ sequenceDiagram
     
     User->>Router: Query + Context Features
     Router->>Router: Compute UCB Scores<br/>(Mean + α×Uncertainty)
-    Router->>Models: Select Top-K Models<br/>with Latency Bias
+    Router->>Models: Rank Model Pool (optionally Top-K)<br/>with Latency Bias
     
     par Parallel Preview Generation
         Models->>Models: Generate Previews
@@ -243,6 +243,33 @@ Implementation: see `src/services/cache_redis.py` and usage in `src/race/race.py
 **When Bandit Helps Most**: Model performance varies by query characteristics (length/intent/risk) and provider health drifts over time.
 
 **When Bandit Won't Help**: Homogeneous models with identical performance across contexts (converges to baseline with minimal overhead).
+
+
+### Ordering: why does it matter if the judge picks a single winner?
+
+It's a two-stage decision problem in the code:
+
+1) Preview stage (parallel): We generate short previews for each candidate model and send them to the judge. The router determines the candidate pool ranking up front. In our current implementation we preview all candidates you provide, but they are ranked for downstream decisions and metrics. Conceptually, you can also limit candidates yourself via `--agent-models` (the sequence diagram's “Top‑K” callout reflects this optional pruning).
+
+2) Full-answer stage (ordered/semi-parallel): After the judge returns a ranking, we attempt the full answer following that order. Two paths exist in `src/race/race.py`:
+   - Sequential: Run the top choice first; if it fails (exception/timeouts) we fall back to the next one. Ordering directly impacts expected retries and tail latency.
+   - Speculative top‑K: For long queries we launch the top 2 full runs concurrently and keep the first to finish; ordering determines which models are eligible for this fast path.
+
+Even if the judge provides a single best candidate, choosing which model to execute first matters because:
+- Failures/timeouts happen. A good ordering minimizes the probability of hitting fallbacks.
+- Speculative execution benefits from promoting models that are both high‑quality and fast.
+- Budgets/limits (`max_total_full_tokens`, `max_total_cost_usd`, timeouts) make the first attempt consume scarce resources—better ordering reduces wasted budget.
+- Time‑to‑first‑useful‑token (and completion) improves when the first pick is likely to both win and be quick.
+
+Where bandit influences this in the code:
+- Candidate ranking before previews: `LinUCBRouter.select(...)` ranks models with an optional latency bias from P95 metrics (`runtime/metrics.py`). While we currently preview all candidates, that ranking feeds into downstream logic and can be used to prune by reducing `--agent-models`.
+- Judge ranking to full stage: After `judge_previews(...)` we compute the final execution order. For long queries, top‑2 speculative full runs use that order. For sequential mode, we follow that order and apply a fallback penalty in the reward policy if we had to retry (`fallback_penalty` in `QualityLatencyCostPolicy`).
+- Online learning: Rewards blend judge quality with latency and cost, so the router learns which models not only “win” but also do so quickly and cheaply for similar future queries.
+
+FAQ — Why not just rely on the judge and ignore routing?
+- Judge quality alone doesn’t encode speed/cost; the reward policy does, and the router learns from it.
+- Previews aren’t free; focusing the candidate set (or at least ranking it) reduces unnecessary work over time.
+- Provider performance drifts. Bandit adapts to real‑world changes, maintaining first‑try success and stable latency.
 
 
 ## Configuration

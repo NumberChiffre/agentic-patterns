@@ -27,6 +27,7 @@ from ..runtime.metrics import (
 from ..routing.routing_linucb import LinUCBRouter
 from ..core.types import PreviewOutcome, Strategy
 from ..core.types import RewardPolicy as RewardPolicyProtocol, FeatureExtractor as FeatureExtractorProtocol
+from ..features import compute_context_features
 from ..runtime.reward import QualityLatencyCostPolicy, QualityLatencyCostWeights
 from ..utils.citations import (
     extract_citations_from_text,
@@ -103,13 +104,13 @@ def _select_models_for_strategy(
     if strategy_value != Strategy.BANDIT:
         return selected_models, None, None
 
+    feats = feature_extractor(query, length_threshold=length_threshold)
     router = LinUCBRouter(
-        d=3,
+        d=len(feats),
         alpha=bandit_alpha,
         ridge_lambda=bandit_ridge_lambda,
         state_path=Path(bandit_state_path) if bandit_state_path else None,
     )
-    feats = feature_extractor(query, length_threshold=length_threshold)
     # Apply latency-aware bias if available (negative bias for slower arms)
     arm_bias: dict[str, float] = {}
     for m in selected_models:
@@ -181,7 +182,17 @@ async def race_with_judge_and_stream(
     if feature_extractor and hasattr(feature_extractor, "compute"):
         feature_fn = lambda q, length_threshold: feature_extractor.compute(q)  # type: ignore[assignment]
     else:
-        feature_fn = feature_extractor or _default_features
+        # Default to combined context features with optional embeddings controlled via env
+        use_embedding = os.getenv("BANDIT_FEATURES", "length") == "embedding"
+        emb_model = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+        emb_dim = int(os.getenv("EMBEDDING_DIM", "24"))
+        feature_fn = lambda q, length_threshold: compute_context_features(  # type: ignore[assignment]
+            q,
+            length_threshold=length_threshold,
+            use_embedding=use_embedding,
+            embedding_model=emb_model,
+            embedding_output_dim=emb_dim,
+        )
     selected_models, router, feats = _select_models_for_strategy(
         query,
         list(agent_models),
@@ -324,9 +335,11 @@ async def race_with_judge_and_stream(
         len(ordered_indices) >= 2
     )
     if do_speculative:
-        logger.info("Speculative top-2 full stage enabled")
-        top2 = ordered_indices[:2]
-        tasks = [asyncio.create_task(_run_full_for_index(i)) for i in top2]
+        speculative_top_k = max(2, int(os.getenv("SPECULATIVE_TOP_K", "2")))
+        speculative_top_k = min(speculative_top_k, len(ordered_indices))
+        logger.info(f"Speculative top-{speculative_top_k} full stage enabled")
+        topk = ordered_indices[:speculative_top_k]
+        tasks = [asyncio.create_task(_run_full_for_index(i)) for i in topk]
         done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
         first = next(iter(done))
         try:
