@@ -158,12 +158,14 @@ The CLI automatically loads `.env` (via `python-dotenv`).
 4) See CLI usage
 
 ```bash
+cd parallel_agents
 uv run parallel-agents --help
 ```
 
 5) Minimal run
 
 ```bash
+cd parallel_agents
 uv run parallel-agents "What are the key risks and mitigations of LLM hallucinations in production?" \
   --judge-model gpt-4o \
   --agent-models "gpt-4o,gpt-4o-mini" \
@@ -182,6 +184,7 @@ uv run ruff check . && uv run ruff format --check . && uv run pytest -q
 6) Full bandit example
 
 ```bash
+cd parallel_agents
 uv run parallel-agents "Summarize the latest evidence for outpatient UTI management in CA-ON." \
   --judge-model gpt-4o \
   --agent-models "o4-mini-deep-research-2025-06-26,gpt-4o,gpt-4o-mini,gpt-5,gpt-4.1" \

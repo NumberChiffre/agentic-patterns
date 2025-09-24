@@ -200,6 +200,10 @@ def main(argv: list[str] | None = None) -> int:
     wandb.init(project=os.getenv("WANDB_PROJECT", project), reinit=True)
 
     agent_models = _parse_models(args.agent_models)
+    
+    # Set environment variables that race.py expects
+    os.environ["SPECULATIVE_TOP_K"] = str(args.speculative_top_k)
+    
     race_kwargs = {
         "query": args.query,
         "judge_model": args.judge_model,
@@ -218,7 +222,6 @@ def main(argv: list[str] | None = None) -> int:
         "adaptive_max_scale": args.adaptive_max_scale,
         "latency_bias_scale": args.latency_bias_scale,
         "speculative_min_query_length": args.speculative_min_query_length,
-        "speculative_top_k": args.speculative_top_k,
         "preview_timeout_s": (args.preview_timeout_s or None),
         "full_timeout_s": (args.full_timeout_s or None),
     }
