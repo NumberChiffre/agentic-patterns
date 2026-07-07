@@ -1,168 +1,405 @@
 ## Parallel AI Research System
 
-A competitive multi-agent system that races multiple frontier models in parallel, using intelligent bandit routing to optimize for quality, latency, and cost.
+A multi-candidate research runner that ranks frontier models, judges short previews, and streams the full answer from the best available candidate. With `--strategy bandit`, the runtime uses a contextual LinUCB router to learn model ordering from judge quality, latency, and optional cost signals.
+
+## What Is Implemented
+
+- `baseline`: keep the input model order.
+- `bandit`: rank the candidate model list with LinUCB before previewing.
+- The router currently ranks all candidate models passed through `--agent-models`; it does not prune the pool by itself.
+- Preview generation is executed per selected model with optional Redis cache reads.
+- Full-answer generation is sequential by judge order, except long queries can use speculative top-k full runs in parallel.
+- Thompson sampling and epsilon-greedy are not runtime strategies here; they only appear in roadmap material.
 
 ## Why Bandit Routing?
 
-Traditional static routing wastes resources by treating all models equally. Our LinUCB bandit system learns which models perform best for different query types, automatically optimizing the exploration-exploitation tradeoff to minimize regret while maximizing research quality.
+Static routing treats the candidate order as fixed. LinUCB learns which models tend to perform well for a query context, while still exploring uncertain arms. In this codebase, the learned ordering is used before preview generation and is updated after the judge and full-answer stages produce feedback.
 
-**Key Benefits**:
-- **Adaptive Performance**: Learns from historical outcomes to improve future routing decisions
-- **Multi-Objective Optimization**: Balances quality, latency, and cost simultaneously  
-- **Uncertainty Quantification**: Uses confidence bounds to explore promising but uncertain options
-- **Production Ready**: Handles concept drift, state persistence, and graceful degradation
+Key benefits:
+
+- Adaptive ordering: learns from historical outcomes.
+- Multi-objective feedback: blends judge quality, latency, and optional cost.
+- Uncertainty-aware exploration: adds a confidence term to each arm score.
+- Persistent learning: stores router state in JSON and, when configured, Redis.
 
 ## System Architecture
 
 ```mermaid
 flowchart TB
-    subgraph "Intelligence Layer"
-        ROUTER[LinUCB Router<br/>Multi-Armed Bandit]
-        REWARD[Reward Policy<br/>Quality + Latency + Cost]
-        METRICS[Metrics Collector<br/>P95 Latency Tracking]
-    end
-    
-    subgraph "Execution Layer"
-        RACE[Race Controller]
-        JUDGE[Judge System<br/>Multi-Dimensional Scoring]
-        AGENTS[Agent Factory<br/>Model Orchestration]
-    end
-    
-    subgraph "Infrastructure"
-        CACHE[Redis Cache<br/>Preview Optimization]
-        STATE[Persistent State<br/>Bandit Learning]
-        STREAM[Streaming Engine<br/>Real-time Responses]
-    end
-    
-    ROUTER --> AGENTS
-    AGENTS --> RACE
-    RACE --> JUDGE
-    JUDGE --> REWARD
-    REWARD --> ROUTER
-    METRICS --> ROUTER
-    RACE --> METRICS
-    
-    AGENTS --> STREAM
-    RACE --> CACHE
-    ROUTER --> STATE
+  query["User query"] --> race["Race controller"]
+  race --> strategy{"Strategy"}
+
+  strategy -->|baseline| inputOrder["Input model order"]
+  strategy -->|bandit| features["Context features"]
+  features --> router["LinUCB router"]
+  metrics["P95 latency metrics"] --> router
+  router --> ranked["Ranked model list"]
+  inputOrder --> ranked
+
+  ranked --> factory["Agent factory"]
+  factory --> cache{"Redis preview cache"}
+  cache -->|hit| previews["Preview texts"]
+  cache -->|miss| previewStream["Preview streaming"]
+  previewStream --> previews
+  previewStream --> metrics
+
+  previews --> judge["Judge previews"]
+  judge --> order["Judge-ordered candidates"]
+  order --> full["Sequential or speculative full run"]
+  full --> answer["Full answer"]
+
+  judge --> reward["Reward policy"]
+  full --> reward
+  reward --> router
+  router --> state["JSON and Redis router state"]
 ```
 
 ## Bandit Routing Flow
 
 ```mermaid
 sequenceDiagram
-    participant User
-    participant Router as LinUCB Router
-    participant Models as Model Pool
-    participant Judge as Judge System
-    participant Reward as Reward Policy
-    
-    User->>Router: Query + Context Features
-    Router->>Router: Compute UCB Scores<br/>(Mean + α×Uncertainty)
-    Router->>Models: Rank Model Pool (optionally Top-K)<br/>with Latency Bias
-    
-    par Parallel Preview Generation
-        Models->>Models: Generate Previews
-        Models->>Models: Record Latency Metrics
-    end
-    
-    Models->>Judge: Submit Previews
-    Judge->>Judge: Multi-Dimensional Scoring<br/>(Relevance, Coverage, Faithfulness)
-    Judge->>Reward: Judge Scores + Latency + Cost
-    Reward->>Reward: Compute Blended Rewards<br/>(Quality×0.8 + Speed×0.2)
-    Reward->>Router: Update Model Beliefs<br/>(Sherman-Morrison)
-    
-    Router->>User: Optimized Model Selection<br/>for Future Queries
+  participant User
+  participant Race
+  participant Router
+  participant Preview
+  participant Judge
+  participant Full
+  participant Reward
+
+  User->>Race: Submit query and candidate models
+  Race->>Router: Score arms when strategy is bandit
+  Router-->>Race: Ranked model list
+
+  loop Each selected model
+    Race->>Preview: Read cache or stream preview
+    Preview-->>Race: Preview text, tokens, and latency
+  end
+
+  Race->>Judge: Submit all previews
+  Judge-->>Race: Scores and candidate order
+
+  alt Long query with enough candidates
+    Race->>Full: Start speculative top-k full runs
+    Full-->>Race: First successful full answer
+  else Sequential path
+    Race->>Full: Try candidates in judge order
+    Full-->>Race: First successful full answer
+  end
+
+  Race->>Reward: Compose per-model rewards
+  Reward->>Router: Bulk update all previewed arms
+  Race-->>User: Winning answer and debug payload
 ```
 
 ## Decision Process
 
 ```mermaid
 flowchart TD
-    START([New Query]) --> EXTRACT[Extract Features<br/>Length, Embeddings, Intent]
-    EXTRACT --> UCB["Compute UCB Scores<br/>Mean + α×√(Uncertainty)"]
-    UCB --> BIAS[Apply Latency Bias<br/>Penalize Slow Models]
-    BIAS --> SELECT[Select Top Models<br/>Ranked by Score]
-    
-    SELECT --> PREVIEW[Generate Previews<br/>Parallel Execution]
-    PREVIEW --> CACHE{Cache Hit?}
-    CACHE -->|Yes| CACHED[Use Cached Result]
-    CACHE -->|No| GENERATE[Stream New Preview]
-    
-    CACHED --> JUDGE[Judge Evaluation]
-    GENERATE --> JUDGE
-    JUDGE --> REWARD[Compute Rewards<br/>Quality + Latency + Cost]
-    REWARD --> UPDATE[Update Router State<br/>Learn from Outcome]
-    UPDATE --> END([Improved Routing])
+  start([New query]) --> strategy{"Strategy"}
+  strategy -->|baseline| baseline["Use input model order"]
+  strategy -->|bandit| featureNode["Build context vector"]
+  featureNode --> score["Compute LinUCB scores"]
+  score --> bias["Apply latency bias when P95 exists"]
+  bias --> ranked["Rank candidate models"]
+  baseline --> ranked
+
+  ranked --> cacheCheck{"Preview cached?"}
+  cacheCheck -->|yes| cached["Use cached preview"]
+  cacheCheck -->|no| stream["Stream preview and record latency"]
+  cached --> collect["Collect previews"]
+  stream --> collect
+
+  collect --> judge["Judge previews"]
+  judge --> ordered["Sort by judge overall score"]
+  ordered --> longQuery{"Long query and at least two candidates?"}
+  longQuery -->|yes| spec["Run speculative top-k full answers"]
+  longQuery -->|no| sequential["Run full answers sequentially"]
+  spec --> result["First successful full answer"]
+  sequential --> result
+
+  result --> rewards["Compute quality latency cost rewards"]
+  rewards --> update["Update LinUCB state"]
+  update --> done([Improved future ordering])
 ```
+
+## Inputs and Outputs
+
+### User and CLI Inputs
+
+| Input | Where it enters | Used for |
+| --- | --- | --- |
+| `query` | Positional CLI argument | Preview prompts, full-answer prompt, feature extraction, latency normalization, reward computation |
+| `--agent-models` | Comma-separated model list | Candidate arms for baseline or bandit ordering |
+| `--judge-model` | CLI flag | Model that scores preview quality |
+| `--strategy` | `baseline` or `bandit` | Chooses input order or learned LinUCB order |
+| `--min-preview-tokens` | CLI flag | Base preview token target before adaptive scaling |
+| `--bandit-length-threshold` | CLI flag / env | Normalizes query length in features and latency reward |
+| `--bandit-features` | `length` or `embedding` | Chooses length-only or length-plus-embedding context vector |
+| `--bandit-alpha` | CLI flag / env | LinUCB exploration strength |
+| `--bandit-ridge` | CLI flag / env | Ridge regularization for new arms |
+| Reward weights | `--bandit-quality-weight`, `--bandit-speed-weight`, `--bandit-cost-weight` | Blend judge quality, latency, and cost into rewards |
+
+### Bandit Context Features
+
+The default router input vector is length-only:
+
+| Position | Feature | Formula | Source |
+| --- | --- | --- | --- |
+| $x_0$ | Bias term | $1$ | Constant |
+| $x_1$ | Query length ratio | $\min\left(1, \frac{\lvert q\rvert}{\tau_+}\right)$ | `LengthFeatures.compute` |
+| $x_2$ | Query word-count ratio | $\min\left(1, \frac{\operatorname{words}(q)}{100}\right)$ | `LengthFeatures.compute` |
+
+When `BANDIT_FEATURES=embedding`, the runtime appends an embedding projection:
+
+| Added features | Mathematical form | Source |
+| --- | --- | --- |
+| $x_{3:}$ | $z = \operatorname{standardize}(P e(q))$, where $e(q)$ is the OpenAI embedding and $P \in \mathbb{R}^{m \times 1536}$ with $m=\max(8,d_{\mathrm{emb}})$ | `EmbeddingFeatures.compute` |
+
+Important exclusions:
+
+- `compute_intent_signals(...)` exists in `src/features.py`, but it is not wired into `compute_context_features(...)`.
+- Per-model latency is not part of $x$; it is added later as an arm-specific score bias.
+- Cost is not part of $x$; it is only used in the reward update when `MODEL_PRICE_USD_PER_TOKEN_JSON` provides prices or through the token-count fallback.
+
+### Router Outputs
+
+| Output | Type | Meaning |
+| --- | --- | --- |
+| `selected_models` | `list[str]` | Candidate models ordered by baseline input order or descending LinUCB score |
+| Router state | JSON file and/or Redis payload | Per-arm $A_a^{-1}$ and $b_a$ values, stored as `A_inv` and `b`, used for future ranking |
+| Preview latency metrics | `.router_metrics.json` by default | Per-model latency samples used for P95 latency bias and latency reward |
+
+The router does not currently remove candidates. In bandit mode it ranks every
+model passed through `--agent-models`, and the preview stage still evaluates all
+ranked candidates.
+
+### Run Outputs
+
+`race_with_judge_and_stream(...)` returns:
+
+| Return value | Meaning |
+| --- | --- |
+| `winner_idx` | Zero-based index of the selected full-answer candidate in the current ranked model list |
+| `winner_agent` | Full agent name used for the winning answer |
+| `debug` | Dictionary with previews, tokens, latencies, judge scores, selected model order, final response, citations, and fallback failures |
+
+The CLI writes the full response to `logs/response_<timestamp>.md` and logs a JSON summary with:
+
+| Field | Meaning |
+| --- | --- |
+| `winner_index`, `winner_agent` | Winning candidate metadata |
+| `judge_scores` | Per-candidate judge scores |
+| `agent_models` | Actual selected model order for this run |
+| `preview_tokens`, `full_response_tokens` | Token counts captured by the streaming layer |
+| `full_response_saved_to` | Path to the saved Markdown response |
+| `citations` | Citations extracted from previews and the full answer |
+
+### Reward Update Inputs
+
+The bandit update happens after the full answer succeeds:
+
+| Reward input | Source | Effect |
+| --- | --- | --- |
+| `judge_overall` | Judge verdict scores | Quality term $Q_a$ |
+| Preview P95 latency | `.router_metrics.json` | Latency term $L_a$ |
+| Preview token counts | Preview streaming output | Cost/token-efficiency term $C_a$ |
+| Failed full-answer indices | Sequential/speculative fallback path | Applies `fallback_penalty` to failed candidates |
 
 ## Algorithm Details
 
-### LinUCB Multi-Armed Bandit
+### Local Markdown Preview
 
-**Mathematical Foundation**:
-- **Linear Reward Model**: $\mathbb{E}[r|x,a] = \theta_a^\top x$ per arm $a$
-- **UCB Score**: $\mathrm{UCB}(x) = \hat{\theta}^\top x + \alpha \sqrt{x^\top A^{-1} x}$
-- **Sherman-Morrison Update**: $(A + xx^\top)^{-1} = A^{-1} - \frac{A^{-1}xx^\top A^{-1}}{1 + x^\top A^{-1}x}$
+This README keeps formulas as LaTeX source so it stays compatible with GitHub
+Markdown. For local preview, use VS Code's built-in Markdown preview rather than
+a replacement renderer. The built-in preview supports KaTeX math blocks and
+Mermaid diagrams, and it stays closest to the system Markdown behavior.
 
-**Why LinUCB Works**:
-- **Exploration-Exploitation Balance**: High uncertainty arms get selected for exploration
-- **Contextual Learning**: Different query types learn different optimal models
-- **Sublinear Regret**: Cumulative regret grows as $O(\sqrt{T \log T})$ with proper tuning
+If the default preview looks too plain, customize the built-in preview with
+`markdown.styles` or a Markdown preview style extension instead of switching to a
+different Markdown renderer.
 
-### Multi-Dimensional Reward Policy
+### Contextual Bandit Used
 
-**Reward Composition**: $R = w_q \cdot Q + w_l \cdot L + w_c \cdot C$ where:
-- **Quality (Q)**: Judge overall scores [0,1] measuring relevance, coverage, faithfulness
-- **Latency (L)**: $1 - \text{latency\_norm}$ with P95-based normalization and query-length scaling
-- **Cost (C)**: $1 - \text{cost\_norm}$ using token proxy or USD price tables
+The runtime learning strategy is LinUCB, implemented in `src/routing/routing_linucb.py`. For each model arm `a`, the router stores an inverse design matrix `A_inv_a` and response vector `b_a`.
 
-**Default Weights**: $w_q=0.8, w_l=0.2, w_c=0.0$ (configurable via CLI)
+Notation:
 
-### Performance Optimizations
+| Symbol | Meaning | Code name |
+| --- | --- | --- |
+| $a$ | Candidate model arm | One entry from `agent_models` |
+| $x$ | Context feature vector for the query | `feats` |
+| $A_a^{-1}$ | Inverse design matrix for arm $a$ | `A_inv` |
+| $b_a$ | Response vector for arm $a$ | `b` |
+| $\lambda$ | Ridge regularization strength | `bandit_ridge_lambda` |
+| $\alpha$ | Exploration strength | `bandit_alpha` |
+| $\beta$ | Latency-bias scale | `latency_bias_scale` |
+| $\rho$ | Full-answer fallback penalty | `fallback_penalty` |
+| $\tau$ | Query-length normalization threshold | `length_threshold` |
+| $T$ | Adaptive preview token target | `adaptive_min_tokens` |
 
-- **Adaptive Preview Scaling**: Token limits scale 75%-150% by query complexity
-- **Speculative Execution**: Top-2 parallel execution for queries >2000 chars
-- **Latency Bias**: P95-based negative bias applied during model selection
-- **State Persistence**: Dual Redis + file persistence with version management
+Initialization:
 
-### Quickstart (Setup + Run)
+$$
+\begin{aligned}
+\lambda_+ &= \max(10^{-9}, \lambda) \\
+A_a^{-1} &= \frac{1}{\lambda_+} I_d,\qquad b_a = \mathbf{0}_d
+\end{aligned}
+$$
 
-1) Install prerequisites
+In code, `A_a^{-1}` is stored as `A_inv_a`.
+
+Scoring:
+
+$$
+\begin{aligned}
+\hat{\theta}_a &= A_a^{-1} b_a \\
+\mu_a(x) &= \hat{\theta}_a^\top x \\
+\sigma_a(x) &= \sqrt{\max(0, x^\top A_a^{-1} x)} \\
+\operatorname{bias}_a(x) &=
+\begin{cases}
+-\beta\ell_a(x), & \text{if P95 latency exists for arm } a \\
+0, & \text{otherwise}
+\end{cases} \\
+s_a(x) &= \mu_a(x) + \alpha\sigma_a(x) + \operatorname{bias}_a(x)
+\end{aligned}
+$$
+
+Notes:
+
+- The bias term is zero when no P95 latency has been recorded for the model.
+- $\beta$ is `latency_bias_scale`.
+- $\ell_a(x)$ is the normalized P95 latency term.
+- $\alpha$ controls exploration strength. The default is $1.5$.
+- $\lambda$ is the ridge regularization value. The default is $10^{-2}$.
+- The selected list is sorted by descending score.
+
+Update after rewards:
+
+$$
+\begin{aligned}
+v_a &= A_a^{-1}x \\
+d_a &= \max(10^{-9}, 1 + x^\top v_a) \\
+A_a^{-1} &\leftarrow A_a^{-1} - \frac{v_a v_a^\top}{d_a} \\
+b_a &\leftarrow b_a + r_a x
+\end{aligned}
+$$
+
+This is the Sherman-Morrison update for $(A_a + xx^\top)^{-1}$, with $A_a$ conceptually initialized as $\lambda_+ I_d$.
+
+### Feature Vector
+
+The default context vector comes from `compute_context_features(...)` with length features enabled:
+
+$$
+\begin{aligned}
+\tau_+ &= \max(1, \tau) \\
+x &=
+\begin{bmatrix}
+1 \\
+\min\left(1, \frac{|q|}{\tau_+}\right) \\
+\min\left(1, \frac{\operatorname{words}(q)}{100}\right)
+\end{bmatrix}
+\end{aligned}
+$$
+
+Here $q$ is the query and $\tau$ is `length_threshold`.
+
+When `BANDIT_FEATURES=embedding`, the runtime appends a fixed-random-projection embedding vector from `text-embedding-3-small` by default. The intent feature helper exists in `src/features.py`, but it is not wired into the default bandit path.
+
+### Reward Policy
+
+The reward policy is implemented in `src/runtime/reward.py`. It normalizes configured weights before composition:
+
+$$
+\begin{aligned}
+S_w &= \max(10^{-9}, w_q + w_l + w_c) \\
+\tilde{w}_q &= \frac{w_q}{S_w},\qquad
+\tilde{w}_l = \frac{w_l}{S_w},\qquad
+\tilde{w}_c = \frac{w_c}{S_w}
+\end{aligned}
+$$
+
+Per-arm terms:
+
+$$
+\begin{aligned}
+Q_a &= \operatorname{judge\_overall}_a \\
+n_q &= \operatorname{clamp}\left(\frac{|q|}{\tau_+}, 0, 1\right) \\
+B(q) &= 3 + 3n_q \\
+\ell_a(q) &= \operatorname{clamp}\left(\frac{\operatorname{p95}_a}{B(q)}, 0, 1\right) \\
+L_a &= 1 - \ell_a(q)
+\end{aligned}
+$$
+
+If no P95 latency exists for the model, `L_a` is `0.5`.
+
+Cost term:
+
+$$
+C_a =
+\begin{cases}
+1 - \operatorname{clamp}\left(\frac{p_a t_a}{\max(10^{-9}, p_a T)}, 0, 1\right), & p_a > 0 \\
+1 - \operatorname{clamp}\left(\frac{t_a}{\max(1, T)}, 0, 1\right), & p_a = 0
+\end{cases}
+$$
+
+Here $p_a$ is the model price per token, $t_a$ is preview tokens for arm $a$, and $T$ is the scaled preview token target that `race.py` passes into the reward policy as `min_preview_tokens`.
+
+Final reward:
+
+$$
+\begin{aligned}
+R_a &= \operatorname{clamp}\left(\tilde{w}_q Q_a + \tilde{w}_l L_a + \tilde{w}_c C_a, 0, 1\right) \\
+R_a &\leftarrow \max(0, R_a - \rho)
+\end{aligned}
+$$
+
+If the full-answer stage failed for that candidate before a fallback succeeded, the runtime applies the second line.
+
+Here $\rho$ is `fallback_penalty`.
+
+Default CLI weights are $w_q=0.8$, $w_l=0.2$, and $w_c=0.0$.
+
+### Performance Behavior
+
+- Adaptive preview scaling: preview token targets scale from `0.75x` to `1.50x` by query length.
+- Latency bias: the router subtracts `latency_bias_scale * latency_norm` from arm scores when P95 latency exists.
+- Speculative full-answer execution: long queries can launch the judge-ordered top-k full runs concurrently and keep the first successful response.
+- State persistence: router state can be stored in a local JSON file and in Redis when `REDIS_URL` is set.
+
+## Quickstart
+
+1. Install prerequisites:
 
 - Python 3.10+
-- uv (Python package manager). If needed: `pip install uv`
+- `uv`
 
-2) Sync dependencies
+2. Sync dependencies:
 
 ```bash
 cd parallel_agents
 uv sync
 ```
 
-3) Configure API keys via .env
-
-Create a file named `.env` in this folder with at least your OpenAI key:
+3. Configure API keys in `.env`:
 
 ```bash
-cat > .env << 'EOF'
 OPENAI_API_KEY=sk-your-openai-key
-# Optional if using a custom endpoint (e.g., Azure/OpenAI-compatible gateway):
+# Optional for compatible gateways:
 # OPENAI_BASE_URL=https://api.openai.com/v1
 # OPENAI_ORG_ID=your-org-id
-EOF
 ```
 
-The CLI automatically loads `.env` (via `python-dotenv`).
+The CLI loads `.env` via `python-dotenv`.
 
-4) See CLI usage
+4. See CLI usage:
 
 ```bash
 cd parallel_agents
 uv run parallel-agents --help
 ```
 
-5) Minimal run
+5. Minimal bandit run:
 
 ```bash
 cd parallel_agents
@@ -172,16 +409,7 @@ uv run parallel-agents "What are the key risks and mitigations of LLM hallucinat
   --strategy bandit
 ```
 
-#### Verify (Tier 1) — default command
-
-After implementing Tier 1, use this command to verify lint, format, and tests:
-
-```bash
-cd parallel_agents && uv sync && \
-uv run ruff check . && uv run ruff format --check . && uv run pytest -q
-```
-
-6) Full bandit example
+6. Full bandit example:
 
 ```bash
 cd parallel_agents
@@ -195,95 +423,89 @@ uv run parallel-agents "Summarize the latest evidence for outpatient UTI managem
   --bandit-state .router_state.json \
   --bandit-length-threshold 2000 \
   --bandit-quality-weight 0.8 \
-  --bandit-speed-weight 0.2
+  --bandit-speed-weight 0.2 \
+  --bandit-cost-weight 0.0
 ```
 
-Notes:
-- An entry point is installed as `parallel-agents` (via `pyproject.toml`). You can also run `uv run python -m src.cli ...`.
-- Router state persistence:
-  - If `REDIS_URL` is set, router state persists in Redis under `ROUTER_STATE_KEY` (default: `router_state`).
-  - If `--bandit-state` points to a file, JSON persistence is also used (for portability). Delete it to reset local learning.
+## Verification
 
-### Optional: Redis preview cache
+Default repo check:
 
-You can enable a lightweight Redis cache for preview responses to reduce cost and latency on repeat queries.
+```bash
+cd parallel_agents
+uv sync
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest -q
+```
 
-1) Run Redis locally (or use a managed instance):
+## Optional Redis Preview Cache
+
+Redis can cache preview responses to reduce repeated model calls.
+
+Run Redis locally:
 
 ```bash
 brew install redis
 brew services start redis
-# or docker run -p 6379:6379 redis:7
 ```
 
-2) Add the following to your `.env`:
+Or run it with Docker:
+
+```bash
+docker run -p 6379:6379 redis:7
+```
+
+Add cache settings to `.env`:
 
 ```bash
 REDIS_URL=redis://localhost:6379/0
-# Optional TTL (seconds) for preview cache entries (default: 600)
 PREVIEW_CACHE_TTL=600
 ```
 
-When `REDIS_URL` is set, the orchestrator will:
-- Attempt to read previews from Redis before calling models
-- Write preview results into Redis with a TTL after generation
-- Fall back to direct generation if the cache is disabled or a miss occurs
+When `REDIS_URL` is set, the orchestrator reads previews from Redis before calling models, writes generated previews with a TTL, and falls back to direct generation on cache misses or cache errors.
 
-Implementation: see `src/services/cache_redis.py` and usage in `src/race/race.py`.
+Implementation references:
 
-## Why Bandit Routing Works
+- `src/services/cache_redis.py`
+- `src/services/state_redis.py`
+- `src/race/race.py`
 
-**Core Problem**: Judge determines quality after seeing all previews, but we must choose which model to run first for the full answer. Without learning, this choice is arbitrary.
+## Why Ordering Still Matters
 
-**Bandit Solution**: Learn the mapping from query context → "which model tends to win judging and succeed" to reduce retries and tail latency.
+The judge sees previews and chooses a winner for the full-answer stage, but ordering still affects retries, latency, and speculative execution:
 
-**Measurable Benefits**:
-- **First-try success rate ↑**: UCB policy increases probability that first attempt matches judge preference
-- **Retries per run ↓**: Fewer fallbacks reduce E2E p95/p99 latency  
-- **Cost ↓**: Reduced retry tokens and bounded exploration via α/λ parameters
-- **Drift resilience**: Online updates adapt to provider quality/latency changes
+- A failed or timed-out full answer falls back to the next judged candidate.
+- Long queries can run top-k full answers speculatively, so the ordered set controls which candidates enter that race.
+- The reward update teaches the router which models are not only high quality, but also fast and cheap enough for similar future queries.
+- Provider performance changes over time, so persisted online feedback is useful even when the judge remains the final quality gate.
 
-**When Bandit Helps Most**: Model performance varies by query characteristics (length/intent/risk) and provider health drifts over time.
+Where the bandit influences the code:
 
-**When Bandit Won't Help**: Homogeneous models with identical performance across contexts (converges to baseline with minimal overhead).
-
-
-### Ordering: why does it matter if the judge picks a single winner?
-
-It's a two-stage decision problem in the code:
-
-1) Preview stage (parallel): We generate short previews for each candidate model and send them to the judge. The router determines the candidate pool ranking up front. In our current implementation we preview all candidates you provide, but they are ranked for downstream decisions and metrics. Conceptually, you can also limit candidates yourself via `--agent-models` (the sequence diagram's “Top‑K” callout reflects this optional pruning).
-
-2) Full-answer stage (ordered/semi-parallel): After the judge returns a ranking, we attempt the full answer following that order. Two paths exist in `src/race/race.py`:
-   - Sequential: Run the top choice first; if it fails (exception/timeouts) we fall back to the next one. Ordering directly impacts expected retries and tail latency.
-   - Speculative top‑K: For long queries we launch the top 2 full runs concurrently and keep the first to finish; ordering determines which models are eligible for this fast path.
-
-Even if the judge provides a single best candidate, choosing which model to execute first matters because:
-- Failures/timeouts happen. A good ordering minimizes the probability of hitting fallbacks.
-- Speculative execution benefits from promoting models that are both high‑quality and fast.
-- Budgets/limits (`max_total_full_tokens`, `max_total_cost_usd`, timeouts) make the first attempt consume scarce resources—better ordering reduces wasted budget.
-- Time‑to‑first‑useful‑token (and completion) improves when the first pick is likely to both win and be quick.
-
-Where bandit influences this in the code:
-- Candidate ranking before previews: `LinUCBRouter.select(...)` ranks models with an optional latency bias from P95 metrics (`runtime/metrics.py`). While we currently preview all candidates, that ranking feeds into downstream logic and can be used to prune by reducing `--agent-models`.
-- Judge ranking to full stage: After `judge_previews(...)` we compute the final execution order. For long queries, top‑2 speculative full runs use that order. For sequential mode, we follow that order and apply a fallback penalty in the reward policy if we had to retry (`fallback_penalty` in `QualityLatencyCostPolicy`).
-- Online learning: Rewards blend judge quality with latency and cost, so the router learns which models not only “win” but also do so quickly and cheaply for similar future queries.
-
-FAQ — Why not just rely on the judge and ignore routing?
-- Judge quality alone doesn’t encode speed/cost; the reward policy does, and the router learns from it.
-- Previews aren’t free; focusing the candidate set (or at least ranking it) reduces unnecessary work over time.
-- Provider performance drifts. Bandit adapts to real‑world changes, maintaining first‑try success and stable latency.
-
+- Candidate ranking before previews: `LinUCBRouter.select(...)` ranks the model list with optional P95 latency bias.
+- Full-answer behavior after judging: `compute_candidate_order(...)` sorts candidates by judge `overall`, then `race.py` runs sequential or speculative full generation.
+- Online learning: `QualityLatencyCostPolicy.compute_rewards(...)` produces rewards and `LinUCBRouter.bulk_update(...)` updates all previewed arms.
 
 ## Configuration
 
-**Core Environment Variables**:
-- `OPENAI_API_KEY`, `REDIS_URL`, `ROUTER_STATE_KEY`
-- `BANDIT_ALPHA`, `BANDIT_RIDGE`, `BANDIT_QUALITY_WEIGHT`, `BANDIT_SPEED_WEIGHT`
-- `PREVIEW_CACHE_TTL`, `MODEL_PRICE_USD_PER_TOKEN_JSON`
+Core environment variables:
 
-**Key CLI Flags**:
-- `--strategy {baseline,bandit}`: Switch routing strategies
-- `--bandit-alpha`: Exploration strength (higher = more exploration)
-- `--bandit-ridge`: Regularization for stability
-- `--bandit-quality-weight --bandit-speed-weight`: Reward composition weights
+- `OPENAI_API_KEY`
+- `REDIS_URL`
+- `ROUTER_STATE_KEY`
+- `BANDIT_ALPHA`
+- `BANDIT_RIDGE`
+- `BANDIT_QUALITY_WEIGHT`
+- `BANDIT_SPEED_WEIGHT`
+- `BANDIT_COST_WEIGHT`
+- `PREVIEW_CACHE_TTL`
+- `MODEL_PRICE_USD_PER_TOKEN_JSON`
+
+Key CLI flags:
+
+- `--strategy {baseline,bandit}`: switch routing strategies.
+- `--bandit-alpha`: exploration strength.
+- `--bandit-ridge`: ridge regularization.
+- `--bandit-quality-weight`, `--bandit-speed-weight`, `--bandit-cost-weight`: reward composition weights.
+- `--latency-bias-scale`: P95 latency penalty scale used in bandit ranking.
+- `--speculative-min-query-length`, `--speculative-top-k`: speculative full-answer controls.
